@@ -1,0 +1,30 @@
+variables:
+  REDDIT_CLIENT_ID: $REDDIT_CLIENT_ID
+  REDDIT_CLIENT_SECRET: $REDDIT_CLIENT_SECRET
+  REDDIT_USER_AGENT: $REDDIT_USER_AGENT
+  KAFKA_BOOTSTRAP_SERVERS: localhost:29092
+
+stages:
+  - test
+
+test:
+  image: ubuntu:latest
+  services:
+    - docker/compose:latest
+    - docker:dind
+  stage: test
+  before_script:
+    - echo REDDIT_CLIENT_ID >> prod.env
+    - echo REDDIT_CLIENT_SECRET >> prod.env
+    - echo REDDIT_USER_AGENT >> prod.env
+    - echo KAFKA_BOOTSTRAP_SERVERS >> prod.env
+    - apt-get -y update
+    - apt -y install make
+    - docker-compose up -d
+  script:
+    - make test-unit
+    - make test-integration
+    - make test-e2e
+  only:
+    - master
+    - main
