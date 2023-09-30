@@ -1,7 +1,9 @@
 FROM python:3.10
 
-COPY src /src
+WORKDIR /src
 
-COPY requirements.txt src/requirements.txt
+COPY src .
 
-RUN pip install -r src/requirements.txt
+COPY requirements.txt .
+
+RUN pip install -r requirements.txt
