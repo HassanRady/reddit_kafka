@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     REDDIT_USER_AGENT: str
     REDDIT_USERNAME: str
     REDDIT_PASSWORD: str
+    
     KAFKA_BOOTSTRAP_SERVERS: str
     KAFKA_RAW_TEXT_TOPIC: str
 
