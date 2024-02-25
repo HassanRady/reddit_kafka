@@ -19,13 +19,14 @@ def get_console_handler():
 
 def get_file_handler(file_name):
     file_handler = logging.handlers.TimedRotatingFileHandler(
-        os.getcwd() + f"/{file_name}.log")
+        os.getcwd() + f"/{file_name}.log"
+    )
     file_handler.setFormatter(FORMATTER)
     return file_handler
 
 
 def get_socket_handler():
-    socket_handler = handlers.SocketHandler(host='localhost', port=9999)
+    socket_handler = handlers.SocketHandler(host="localhost", port=9999)
     socket_handler.setFormatter(FORMATTER)
     return socket_handler
 
