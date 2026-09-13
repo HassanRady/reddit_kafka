@@ -2,26 +2,26 @@ language: 'python'
 
 tasks:
   install:
-    command: 'pipenv sync --dev'
+    command: 'uv sync --frozen'
     inputs:
-      - 'Pipfile'
-      - 'Pipfile.lock'
+      - 'pyproject.toml'
+      - 'uv.lock'
 
   test:
-    command: 'pipenv run pytest'
+    command: 'uv run --frozen pytest'
     inputs:
       - 'src/**/*'
       - 'tests/**/*'
 
 
   format:
-    command: 'pipenv run ruff format src'
+    command: 'uv run --frozen ruff format src'
     inputs:
       - 'src/**/*'
       - 'pyproject.toml'
 
   lint:
-    command: 'pipenv run ruff check src tests'
+    command: 'uv run --frozen ruff check src tests'
     inputs:
       - 'src/**/*'
       - 'tests/**/*'

@@ -2,20 +2,20 @@ repos:
   - repo: local
     hooks:
       - id: ruff
-        name: ruff check --fix (pipenv)
-        entry: pipenv run ruff check --fix
+        name: ruff check --fix (uv)
+        entry: uv run --frozen ruff check --fix
         language: system
         types: [ python ]
 
       - id: ruff-format
-        name: ruff format (pipenv)
-        entry: pipenv run ruff format
+        name: ruff format (uv)
+        entry: uv run --frozen ruff format
         language: system
         types: [ python ]
 
       - id: mypy
-        name: mypy (pipenv)
-        entry: pipenv run mypy
+        name: mypy (uv)
+        entry: uv run --frozen mypy
         language: system
         types: [ python ]
         exclude: ^tests/
@@ -24,8 +24,8 @@ repos:
   - repo: local
     hooks:
       - id: pytest
-        name: pytest (pipenv)
-        entry: pipenv run pytest
+        name: pytest (uv)
+        entry: uv run --frozen pytest
         language: system
         pass_filenames: false
         stages: [ pre-push ]

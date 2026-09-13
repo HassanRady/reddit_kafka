@@ -14,7 +14,13 @@ MIGRATION_RETRY_DELAY_SECONDS = 10
 
 
 def _is_retryable_migration_error(error: Exception) -> bool:
-    retryable_types = (ConnectionError, TimeoutError, OSError, OperationalError, DBAPIError)
+    retryable_types = (
+        ConnectionError,
+        TimeoutError,
+        OSError,
+        OperationalError,
+        DBAPIError,
+    )
     if isinstance(error, retryable_types):
         return True
 
@@ -46,12 +52,14 @@ async def _run_with_retry(operation: Callable[[], Awaitable[None]]) -> None:
             remaining_seconds = deadline - monotonic()
             if remaining_seconds <= 0:
                 raise TimeoutError(
-                    f"Migration database setup did not succeed within {MAX_MIGRATION_WAIT_SECONDS} seconds"
+                    "Migration database setup did not succeed within "
+                    f"{MAX_MIGRATION_WAIT_SECONDS} seconds"
                 ) from error
 
             sleep_seconds = min(MIGRATION_RETRY_DELAY_SECONDS, remaining_seconds)
             print(
-                f"Migration attempt failed: {error}. Retrying in {sleep_seconds:.0f}s..."
+                f"Migration attempt failed: {error}. "
+                f"Retrying in {sleep_seconds:.0f}s..."
             )
             await asyncio.sleep(sleep_seconds)
 
@@ -72,7 +80,9 @@ async def run_migrations(settings: PostgresSettings) -> None:
             for migration_file in migration_files:
                 print(f"Running migration: {migration_file.name}")
                 raw_sql = migration_file.read_text()
-                statements = [stmt.strip() for stmt in raw_sql.split(";") if stmt.strip()]
+                statements = [
+                    stmt.strip() for stmt in raw_sql.split(";") if stmt.strip()
+                ]
 
                 for statement in statements:
                     await conn.execute(text(statement))

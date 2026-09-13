@@ -63,27 +63,29 @@ docker compose down -v
 docker compose up --build
 ```
 
-If you prefer not to use Docker, see the next section for running migrations and tests locally via Pipenv.
+If you prefer not to use Docker, see the next section for running migrations and tests locally via uv.
 
 ---
 
 ## Local dev (without Docker)
 
-This project uses `Pipfile` for dev dependencies. Example commands:
+This project uses uv with dependencies declared in `pyproject.toml` and pinned in
+`uv.lock`. Install [uv](https://docs.astral.sh/uv/getting-started/installation/),
+then run:
 
 ```bash
-# create virtualenv and install (if using pipenv locally)
-pipenv install --dev
+# create .venv and install locked runtime and development dependencies
+uv sync --frozen
 
 # run migrations against a running Postgres instance
-pipenv run python -m src.migrations
+uv run --frozen python -m src.migrations
 
 # run tests
-pipenv run pytest -v
+uv run --frozen pytest -v
 
 # static checks
-pipenv run mypy src
-pipenv run ruff check src
+uv run --frozen mypy src
+uv run --frozen ruff check src
 ```
 
 Notes
@@ -127,11 +129,11 @@ Recommended dev flow:
 
 ```bash
 # run tests
-pipenv run pytest -q
+uv run --frozen pytest -q
 
 # static checks
-pipenv run mypy src
-pipenv run ruff check src
+uv run --frozen mypy src
+uv run --frozen ruff check src
 ```
 
 ---
