@@ -1,10 +1,12 @@
 from datetime import datetime
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class RedditCommentMessage(BaseModel):
     """Pydantic model for Reddit comment messages published to Kafka."""
+
+    model_config = ConfigDict(use_enum_values=True, populate_by_name=True)
 
     subreddit: str = Field(
         ..., description="Subreddit name (e.g., 'python', 'MachineLearning')"
@@ -47,10 +49,6 @@ class RedditCommentMessage(BaseModel):
         if len(value) > 255:
             raise ValueError("Author ID too long (max 255 characters)")
         return value
-
-    class Config:
-        use_enum_values = True
-        populate_by_name = True
 
 
 __all__ = ["RedditCommentMessage"]

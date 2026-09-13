@@ -30,12 +30,14 @@ class StreamManager:
         runner: Callable[[str], Awaitable[None]],
         instance_id: str,
         lock_manager: DistributedLockManager | None = None,
+        stop_poll_interval: float = 1.0,
     ):
         self.registry = registry
         self.runner = runner
         self.instance_id = instance_id
         # Optional lock manager to prevent duplicate streams across instances.
         self.lock_manager: DistributedLockManager | None = lock_manager
+        self.stop_poll_interval = stop_poll_interval
         # local map of stream_id -> asyncio.Task
         self._tasks: dict[str, asyncio.Task[None]] = {}
         # protects _tasks
@@ -81,14 +83,35 @@ class StreamManager:
 
     async def _run(self, stream_id: str, subreddit: str) -> None:
         """Wrapper around the runner, handling lifecycle updates and errors."""
+        runner_task: asyncio.Task[None] = asyncio.create_task(
+            self._invoke_runner(subreddit), name=f"stream-runner-{stream_id}"
+        )
+        stop_watcher = asyncio.create_task(
+            self._wait_for_stop_request(stream_id),
+            name=f"stream-stop-watcher-{stream_id}",
+        )
         try:
             logger.info("starting runner for %s (id=%s)", subreddit, stream_id)
-            await self.runner(subreddit)
+            done, _ = await asyncio.wait(
+                {runner_task, stop_watcher}, return_when=asyncio.FIRST_COMPLETED
+            )
+
+            if stop_watcher in done and stop_watcher.result():
+                logger.info("shared stop requested for stream %s", stream_id)
+                runner_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await runner_task
+            else:
+                await runner_task
+
             # runner returned normally - mark stopped
             await self.registry.update_status(stream_id, "stopped")
             logger.info("runner finished for %s (id=%s)", subreddit, stream_id)
         except asyncio.CancelledError:
             # graceful cancellation
+            runner_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await runner_task
             await self.registry.update_status(stream_id, "stopped")
             logger.info("runner cancelled for %s (id=%s)", subreddit, stream_id)
             raise
@@ -99,17 +122,37 @@ class StreamManager:
             await self.registry.update_status(stream_id, "error")
             logger.exception("stream %s crashed", stream_id)
         finally:
+            if not runner_task.done():
+                runner_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await runner_task
+            stop_watcher.cancel()
+            with suppress(asyncio.CancelledError):
+                await stop_watcher
             async with self._lock:
                 if stream_id in self._tasks:
                     del self._tasks[stream_id]
 
+    async def _invoke_runner(self, subreddit: str) -> None:
+        """Adapt the injected Awaitable factory to an asyncio coroutine."""
+        await self.runner(subreddit)
+
+    async def _wait_for_stop_request(self, stream_id: str) -> bool:
+        """Poll shared state until another process requests termination."""
+        while True:
+            if await self.registry.is_stop_requested(stream_id):
+                return True
+            await asyncio.sleep(self.stop_poll_interval)
+
     async def stop_stream(self, stream_id: str) -> None:
+        # Publish first so the owning process sees the request even if this
+        # process is terminated before it can perform a local cancellation.
+        await self.registry.request_stop(stream_id)
+
         async with self._lock:
             task = self._tasks.get(stream_id)
             if not task:
                 logger.info("stop requested for non-local stream %s", stream_id)
-                with suppress(Exception):
-                    await self.registry.update_status(stream_id, "stopped")
                 return
             task.cancel()
         with suppress(asyncio.CancelledError):

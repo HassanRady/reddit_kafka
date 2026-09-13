@@ -28,7 +28,7 @@ variable "availability_zones" {
 }
 variable "rds_instance_class" {
   type    = string
-  default = "db.t3.micro"
+  default = "db.r5.large"
 }
 variable "rds_master_password" {
   type      = string
@@ -125,7 +125,7 @@ variable "redis_user" {
 }
 variable "kafka_raw_text_topic" {
   type    = string
-  default = "reddit_raw_comments"
+  default = "RedditComment"
 }
 
 

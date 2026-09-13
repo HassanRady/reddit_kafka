@@ -1,22 +1,40 @@
 language: 'python'
-type: 'application'
 
 tasks:
   install:
-    command: 'pipenv install --dev'
+    command: 'uv sync --frozen'
     inputs:
-      - 'Pipfile'
-      - 'Pipfile.lock'
+      - 'pyproject.toml'
+      - 'uv.lock'
 
   test:
-    command: 'pipenv run pytest'
+    command: 'uv run --frozen pytest'
     inputs:
       - 'src/**/*'
       - 'tests/**/*'
-    outputs:
-      - 'junit.xml'
 
-  lint:
-    command: 'pipenv run ruff format src'
+  e2e:
+    command: './scripts/run-e2e.sh'
+    local: true
+    inputs:
+      - 'Dockerfile'
+      - 'docker-compose.e2e.yml'
+      - 'migrations/**/*'
+      - 'schemas/**/*'
+      - 'scripts/run-e2e.sh'
+      - 'src/**/*'
+      - 'tests/e2e/**/*'
+
+
+  format:
+    command: 'uv run --frozen ruff format src'
     inputs:
       - 'src/**/*'
+      - 'pyproject.toml'
+
+  lint:
+    command: 'uv run --frozen ruff check src tests'
+    inputs:
+      - 'src/**/*'
+      - 'tests/**/*'
+      - 'pyproject.toml'

@@ -23,6 +23,7 @@ class RedisSettings(BaseSettings):
     port: int = Field(alias="REDIS_PORT")
     user: str = Field(alias="REDIS_USER")
     password: SecretStr = Field(alias="REDIS_PASSWORD")
+    use_ssl: bool = Field(False, alias="REDIS_USE_SSL")
 
 
 class PostgresSettings(BaseSettings):
@@ -45,8 +46,8 @@ class Settings(BaseSettings):
     db_flush_interval: int = Field(10, alias="DB_FLUSH_INTERVAL")
     dead_stream_cleanup_interval: int = Field(120, alias="DEAD_STREAM_CLEANUP_INTERVAL")
 
-    reddit: RedditSettings = RedditSettings()
-    kafka: KafkaSettings = KafkaSettings()
-    redis: RedisSettings = RedisSettings()
-    postgres: PostgresSettings = PostgresSettings()
-    schema_settings: SchemaSettings = SchemaSettings()
+    reddit: RedditSettings = Field(default_factory=RedditSettings)
+    kafka: KafkaSettings = Field(default_factory=KafkaSettings)
+    redis: RedisSettings = Field(default_factory=RedisSettings)
+    postgres: PostgresSettings = Field(default_factory=PostgresSettings)
+    schema_settings: SchemaSettings = Field(default_factory=SchemaSettings)

@@ -13,7 +13,11 @@ from fastapi import FastAPI, HTTPException
 from src.config import Settings
 from src.db import close_db, get_engine, get_session, init_db
 from src.redis_client import close_redis, get_redis
-from src.repositories.stream_registry import StreamExistsError, StreamRegistry
+from src.repositories.stream_registry import (
+    StreamExistsError,
+    StreamNotFoundError,
+    StreamRegistry,
+)
 from src.stream.lock import DistributedLockManager
 from src.stream.manager import StreamManager
 from src.stream.worker import StreamWorker
@@ -252,5 +256,8 @@ async def list_streams() -> list[dict[str, Any]]:
 @app.post("/streams/{stream_id}/stop")
 async def stop_stream(stream_id: str) -> dict[str, Any]:
     """Stop a stream."""
-    await app.state.manager.stop_stream(stream_id)
+    try:
+        await app.state.manager.stop_stream(stream_id)
+    except StreamNotFoundError:
+        raise HTTPException(status_code=404, detail="Stream not found") from None
     return {"stream_id": stream_id, "status": "stopping"}

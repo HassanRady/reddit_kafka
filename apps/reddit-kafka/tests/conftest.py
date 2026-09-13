@@ -4,9 +4,6 @@ import pytest
 import redis.asyncio as redis
 
 
-
-
-
 @pytest.fixture
 def redis_mock():
     """Mock Redis client for testing with async support."""

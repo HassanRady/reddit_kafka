@@ -9,6 +9,10 @@ terraform {
       source  = "hashicorp/random"
       version = "~> 3.6"
     }
+    tls = {
+      source  = "hashicorp/tls"
+      version = "~> 4.0"
+    }
   }
 }
 
@@ -20,8 +24,6 @@ provider "aws" {
       Project     = var.project_name
       Environment = var.environment
       ManagedBy   = "Terraform"
-      CreatedAt   = timestamp()
     }
   }
 }
-

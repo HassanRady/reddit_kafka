@@ -30,9 +30,7 @@ class TestCheckpointFlusherFlush:
     ):
         stream_id = str(uuid.uuid4())
         checkpoint_key = f"stream:checkpoint:{stream_id}"
-        redis_mock.scan_iter = MagicMock(
-            return_value=self._scan_iter(checkpoint_key)
-        )
+        redis_mock.scan_iter = MagicMock(return_value=self._scan_iter(checkpoint_key))
         redis_mock.pipeline.return_value.execute = AsyncMock(
             return_value=[
                 {
@@ -54,9 +52,7 @@ class TestCheckpointFlusherFlush:
     ):
         stream_id = str(uuid.uuid4())
         checkpoint_key = f"stream:checkpoint:{stream_id}"
-        redis_mock.scan_iter = MagicMock(
-            return_value=self._scan_iter(checkpoint_key)
-        )
+        redis_mock.scan_iter = MagicMock(return_value=self._scan_iter(checkpoint_key))
         redis_mock.pipeline.return_value.execute = AsyncMock(
             return_value=[
                 {

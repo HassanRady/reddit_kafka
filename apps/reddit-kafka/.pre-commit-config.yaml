@@ -2,30 +2,30 @@ repos:
   - repo: local
     hooks:
       - id: ruff
-        name: ruff check --fix (pipenv)
-        entry: pipenv run ruff check --fix
+        name: ruff check --fix (uv)
+        entry: uv run --project apps/reddit-kafka --frozen ruff check --fix
         language: system
         types: [ python ]
 
       - id: ruff-format
-        name: ruff format (pipenv)
-        entry: pipenv run ruff format
+        name: ruff format (uv)
+        entry: uv run --project apps/reddit-kafka --frozen ruff format
         language: system
         types: [ python ]
 
       - id: mypy
-        name: mypy (pipenv)
-        entry: pipenv run mypy
+        name: mypy (uv)
+        entry: uv run --project apps/reddit-kafka --frozen mypy --config-file apps/reddit-kafka/pyproject.toml
         language: system
         types: [ python ]
-        exclude: ^tests/
+        exclude: ^apps/reddit-kafka/tests/
 
   #  This could be optional since we may push our incomplete work before leaving
   - repo: local
     hooks:
       - id: pytest
-        name: pytest (pipenv)
-        entry: pipenv run pytest
+        name: pytest (uv)
+        entry: uv run --directory apps/reddit-kafka --frozen pytest
         language: system
         pass_filenames: false
         stages: [ pre-push ]

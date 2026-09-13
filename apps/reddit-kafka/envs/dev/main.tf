@@ -73,6 +73,18 @@ output "ecs_cluster_name" {
   value       = module.reddit_kafka.ecs_cluster_name
   description = "ECS cluster name"
 }
+output "private_subnet_ids" {
+  value       = module.reddit_kafka.private_subnet_ids
+  description = "Private subnet IDs for ECS networking"
+}
+output "ecs_security_group_id" {
+  value       = module.reddit_kafka.ecs_security_group_id
+  description = "Security group ID for ECS tasks"
+}
+output "ecs_task_definition_arn" {
+  value       = module.reddit_kafka.ecs_task_definition_arn
+  description = "Latest ECS task definition ARN"
+}
 output "deployment_info" {
   value = {
     environment  = var.environment

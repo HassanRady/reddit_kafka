@@ -2,10 +2,11 @@
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from enum import Enum
-from collections.abc import Awaitable, Callable
 from typing import Any
+
 from src.stream.error_handler import ErrorHandler
 
 logger = logging.getLogger(__name__)
@@ -135,7 +136,12 @@ class CircuitBreaker:
 
         if self.state == CircuitState.HALF_OPEN:
             # Failure during recovery attempt: increase backoff and reopen.
-            new_backoff = int(min(max(self.backoff_seconds * self.backoff_multiplier, suggested), self.max_backoff))
+            new_backoff = int(
+                min(
+                    max(self.backoff_seconds * self.backoff_multiplier, suggested),
+                    self.max_backoff,
+                )
+            )
             self.backoff_seconds = new_backoff
             self.state = CircuitState.OPEN
             logger.error(
@@ -144,7 +150,12 @@ class CircuitBreaker:
             )
         elif self.failure_count >= self.failure_threshold:
             # Open circuit on threshold and prefer any error-suggested backoff
-            new_backoff = int(min(max(self.backoff_seconds * self.backoff_multiplier, suggested), self.max_backoff))
+            new_backoff = int(
+                min(
+                    max(self.backoff_seconds * self.backoff_multiplier, suggested),
+                    self.max_backoff,
+                )
+            )
             self.backoff_seconds = new_backoff
             self.state = CircuitState.OPEN
             logger.error(

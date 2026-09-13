@@ -28,7 +28,7 @@ variable "availability_zones" {
 }
 variable "rds_instance_class" {
   type    = string
-  default = "db.t3.micro"
+  default = "db.r5.large"
 }
 variable "rds_master_password" {
   type      = string
@@ -103,6 +103,7 @@ variable "enable_kms_encryption" {
   type    = bool
   default = true
 }
+
 variable "kafka_security_protocol" {
   type    = string
   default = "SASL_SSL"
@@ -125,7 +126,7 @@ variable "redis_user" {
 }
 variable "kafka_raw_text_topic" {
   type    = string
-  default = "reddit_raw_comments"
+  default = "RedditComment"
 }
 
 
@@ -141,8 +142,8 @@ variable "schema_name" {
 }
 
 variable "schema_version" {
-  type    = number
-  default = 1
+  type    = string
+  default = "1"
 }
 
 variable "use_localstack" {
@@ -151,13 +152,13 @@ variable "use_localstack" {
 }
 
 variable "db_flush_interval" {
-  type    = number
-  default = 10
+  type    = string
+  default = "10"
 }
 
 variable "dead_stream_cleanup_interval" {
-  type    = number
-  default = 120
+  type    = string
+  default = "120"
 }
 
 variable "log_level" {

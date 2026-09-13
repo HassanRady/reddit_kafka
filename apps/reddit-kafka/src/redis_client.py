@@ -19,6 +19,9 @@ def get_redis(settings: RedisSettings) -> redis.Redis:
             username=settings.user,
             password=settings.password.get_secret_value(),
             decode_responses=True,
+            socket_connect_timeout=5,
+            socket_timeout=5,
+            ssl=settings.use_ssl,
         )
     return _redis
 

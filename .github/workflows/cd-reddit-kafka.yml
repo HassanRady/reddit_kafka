@@ -1,11 +1,17 @@
 name: CD - Deploy to AWS
 
 on:
+  pull_request:
+    paths:
+      - apps/reddit-kafka/**
   push:
     branches:
       - main
+      - master
       - staging
       - dev
+    paths:
+      - apps/reddit-kafka/**
   workflow_dispatch:
 
 permissions:
@@ -18,6 +24,8 @@ env:
 
 jobs:
   determine-env:
+    # Temporary kill switch: remove this condition to re-enable CD.
+    if: ${{ false }}
     name: Determine Environment
     runs-on: ubuntu-latest
     outputs:
@@ -54,6 +62,8 @@ jobs:
     name: Build and push image
     runs-on: ubuntu-latest
     needs: determine-env
+    environment:
+      name: ${{ needs.determine-env.outputs.environment }}
     outputs:
       image_uri: ${{ steps.image-uri.outputs.uri }}
 
@@ -83,8 +93,8 @@ jobs:
         id: image
         uses: docker/build-push-action@v6
         with:
-          context: .
-          file: ./Dockerfile
+          context: ./apps/reddit-kafka
+          file: ./apps/reddit-kafka/Dockerfile
           push: true
           tags: |
             ${{ steps.login-ecr.outputs.registry }}/${{ needs.determine-env.outputs.ecr_repository }}:${{ github.sha }}
@@ -118,82 +128,148 @@ jobs:
         uses: hashicorp/setup-terraform@v2
         with:
           terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
 
       - name: Terraform Init
-        working-directory: ${{ needs.determine-env.outputs.terraform_dir }}
+        working-directory: ./apps/reddit-kafka/${{ needs.determine-env.outputs.terraform_dir }}
         run: terraform init
 
       - name: Terraform Validate
-        working-directory: ${{ needs.determine-env.outputs.terraform_dir }}
+        working-directory: ./apps/reddit-kafka/${{ needs.determine-env.outputs.terraform_dir }}
         run: terraform validate
 
       - name: Terraform Plan
-        working-directory: ${{ needs.determine-env.outputs.terraform_dir }}
+        working-directory: ./apps/reddit-kafka/${{ needs.determine-env.outputs.terraform_dir }}
         run: |
           terraform plan \
             -var="app_image_tag=${{ github.sha }}" \
-            -var-file="${{ needs.determine-env.outputs.terraform_dir }}/terraform.tfvars" \
+            -var-file="terraform.tfvars" \
             -out=tfplan
 
       - name: Terraform Apply
-        working-directory: ${{ needs.determine-env.outputs.terraform_dir }}
-        run: terraform apply -auto-approve tfplan
+        working-directory: ./apps/reddit-kafka/${{ needs.determine-env.outputs.terraform_dir }}
+        run: |
+          set -o pipefail
+
+          # Apply with auto-approve, capture output for error handling
+          if terraform apply -auto-approve tfplan 2>&1 | tee tf-apply.log; then
+            echo "✅ Terraform apply succeeded"
+          else
+            echo "⚠️  Terraform apply failed, checking for known issues..."
+
+            SHOULD_RETRY=false
+
+            if grep -Eq "ResourceExistsException: The operation failed because the secret .*reddit/.*/credentials already exists|ResourceExistsException.*reddit.*credentials|The secret .* already exists" tf-apply.log; then
+              echo "ℹ️  Reddit credentials secret already exists. Importing into state..."
+              SECRET_NAME="reddit-kafka-${{ needs.determine-env.outputs.environment }}/reddit/credentials"
+              if aws secretsmanager describe-secret --secret-id "$SECRET_NAME" &>/dev/null; then
+                SECRET_ARN=$(aws secretsmanager describe-secret --secret-id "$SECRET_NAME" --query 'ARN' --output text)
+                terraform import \
+                  -var="app_image_tag=${{ github.sha }}" \
+                  -var-file="terraform.tfvars" \
+                  module.reddit_kafka.aws_secretsmanager_secret.reddit_credentials \
+                  "$SECRET_ARN" || true
+                SHOULD_RETRY=true
+              fi
+            fi
+
+            if grep -Eq "RepositoryAlreadyExistsException|The repository with name '.*' already exists" tf-apply.log; then
+              echo "ℹ️  ECR repository already exists. Importing into state..."
+              terraform import \
+                -var="app_image_tag=${{ github.sha }}" \
+                -var-file="terraform.tfvars" \
+                module.reddit_kafka.aws_ecr_repository.app \
+                "${{ needs.determine-env.outputs.ecr_repository }}" || true
+              SHOULD_RETRY=true
+            fi
+
+            if [ "$SHOULD_RETRY" = true ]; then
+              echo "Retrying Terraform apply..."
+              terraform plan \
+                -var="app_image_tag=${{ github.sha }}" \
+                -var-file="terraform.tfvars" \
+                -out=tfplan
+              terraform apply -auto-approve tfplan
+            else
+              echo "❌ Terraform apply failed with unexpected error"
+              exit 1
+            fi
+          fi
 
       - name: Get Terraform Outputs
         id: tf-output
-        working-directory: ${{ needs.determine-env.outputs.terraform_dir }}
+        working-directory: ./apps/reddit-kafka/${{ needs.determine-env.outputs.terraform_dir }}
         run: |
           echo "alb_dns=$(terraform output -raw alb_dns)" >> $GITHUB_OUTPUT
           echo "ecs_cluster=$(terraform output -raw ecs_cluster_name)" >> $GITHUB_OUTPUT
-          echo "subnet_ids=$(terraform output -raw private_subnet_ids)" >> $GITHUB_OUTPUT
+          echo "subnet_ids=$(terraform output -json private_subnet_ids | jq -c '.')" >> $GITHUB_OUTPUT
           echo "security_group_id=$(terraform output -raw ecs_security_group_id)" >> $GITHUB_OUTPUT
           echo "task_definition=$(terraform output -raw ecs_task_definition_arn)" >> $GITHUB_OUTPUT
 
       - name: Run Database Migrations
         id: migrations
         run: |
-          # Extract subnet and security group from Terraform outputs
-          SUBNETS=$(echo '${{ steps.tf-output.outputs.subnet_ids }}' | jq -c '.')
-          SG=$(echo '${{ steps.tf-output.outputs.security_group_id }}')
-          TASK_DEF=$(echo '${{ steps.tf-output.outputs.task_definition }}' | rev | cut -d':' -f1 | rev)
+          # Extract values from Terraform outputs
+          SUBNETS='${{ steps.tf-output.outputs.subnet_ids }}'
+          SG='${{ steps.tf-output.outputs.security_group_id }}'
+          TASK_DEF='${{ steps.tf-output.outputs.task_definition }}'
 
           # Extract cluster name for the run-task call
           CLUSTER="${{ needs.determine-env.outputs.ecs_cluster }}"
+
+          # Build a valid JSON network configuration to avoid shell quoting issues
+          NET_CONFIG=$(jq -n --argjson subs "$SUBNETS" --arg sg "$SG" \
+            '{"awsvpcConfiguration":{"subnets":$subs,"securityGroups":[$sg],"assignPublicIp":"DISABLED"}}')
 
           RUN_OUT=$(aws ecs run-task \
           --cluster "$CLUSTER" \
           --task-definition "$TASK_DEF" \
           --launch-type FARGATE \
-          --network-configuration "awsvpcConfiguration={subnets=$SUBNETS,securityGroups=[$SG],assignPublicIp=DISABLED}" \
+          --network-configuration "$NET_CONFIG" \
           --overrides '{"containerOverrides":[{"name":"app","command":["python","-m","src.migrations"]}]}' \
           --region $AWS_REGION --output json)
 
+          FAILURES=$(echo "$RUN_OUT" | jq -c '.failures // []')
+          if [ "$FAILURES" != "[]" ]; then
+            echo "❌ ECS run-task returned failures: $FAILURES"
+            exit 1
+          fi
+
           TASK_ARN=$(echo "$RUN_OUT" | jq -r '.tasks[0].taskArn // ""')
+          if [ -z "$TASK_ARN" ]; then
+            echo "❌ No task ARN returned from ECS run-task"
+            exit 1
+          fi
 
           echo "task_arn=$TASK_ARN" >> $GITHUB_OUTPUT
 
       - name: Wait for Migrations to Complete
         run: |
-          if [ -n "${{ steps.migrations.outputs.task_arn }}" ]; then
-            aws ecs wait tasks-stopped \
-              --cluster ${{ needs.determine-env.outputs.ecs_cluster }} \
-              --tasks ${{ steps.migrations.outputs.task_arn }} \
-              --region ${{ env.AWS_REGION }}
-            
-            # Check exit code
-            EXIT_CODE=$(aws ecs describe-tasks \
-              --cluster ${{ needs.determine-env.outputs.ecs_cluster }} \
-              --tasks ${{ steps.migrations.outputs.task_arn }} \
-              --query 'tasks[0].containers[0].exitCode' \
-              --output text \
-              --region ${{ env.AWS_REGION }})
-            
-            if [ "$EXIT_CODE" != "0" ]; then
-              echo "❌ Migrations failed with exit code: $EXIT_CODE"
-              exit 1
-            fi
-            echo "✅ Migrations completed successfully"
+          if [ -z "${{ steps.migrations.outputs.task_arn }}" ]; then
+            echo "❌ Migration task ARN is empty"
+            exit 1
           fi
+
+          aws ecs wait tasks-stopped \
+            --cluster ${{ needs.determine-env.outputs.ecs_cluster }} \
+            --tasks ${{ steps.migrations.outputs.task_arn }} \
+            --region ${{ env.AWS_REGION }}
+
+          TASK_DESC=$(aws ecs describe-tasks \
+            --cluster ${{ needs.determine-env.outputs.ecs_cluster }} \
+            --tasks ${{ steps.migrations.outputs.task_arn }} \
+            --output json \
+            --region ${{ env.AWS_REGION }})
+
+          EXIT_CODE=$(echo "$TASK_DESC" | jq -r '.tasks[0].containers[0].exitCode // ""')
+          STOPPED_REASON=$(echo "$TASK_DESC" | jq -r '.tasks[0].stoppedReason // ""')
+
+          if [ -z "$EXIT_CODE" ] || [ "$EXIT_CODE" != "0" ]; then
+            echo "❌ Migrations failed. Exit code: ${EXIT_CODE:-null}. Reason: $STOPPED_REASON"
+            echo "$TASK_DESC" | jq -c '.tasks[0].containers[0]'
+            exit 1
+          fi
+          echo "✅ Migrations completed successfully"
         timeout-minutes: 10
 
       - name: Wait for Service Stability

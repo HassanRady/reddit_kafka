@@ -10,7 +10,7 @@ public_subnet_cidrs  = ["10.30.0.0/24", "10.30.1.0/24"]
 private_subnet_cidrs = ["10.30.10.0/24", "10.30.11.0/24"]
 availability_zones   = [] # Leave empty to auto-detect
 # Database Configuration
-rds_instance_class  = "db.t3.micro" # Use db.t3.small or larger for production
+rds_instance_class  = "db.r5.large" # Supported for Aurora PostgreSQL 16.13 in dev
 rds_master_password = ""            # Leave blank to generate a strong password
 # Cache Configuration
 redis_node_type  = "cache.t3.micro" # Use cache.r6g.large for production
@@ -46,6 +46,7 @@ kafka_raw_text_topic = "raw-text"
 
 schema_registry_name         = "reddit-kafka-schemas"
 schema_name                  = "RedditComment"
+schema_version               = "1"
 use_localstack               = false
-db_flush_interval            = 90
-dead_stream_cleanup_interval = 100
+db_flush_interval            = "90"
+dead_stream_cleanup_interval = "100"

@@ -206,9 +206,10 @@ class TestStreamRegistryDelete:
         }
         redis_mock.hgetall = AsyncMock(return_value=stream_data)
 
-        pipe_mock = AsyncMock()
+        pipe_mock = MagicMock()
         pipe_mock.execute = AsyncMock()
-        pipe_mock.delete = AsyncMock(return_value=pipe_mock)
+        pipe_mock.delete = MagicMock(return_value=pipe_mock)
+        pipe_mock.srem = MagicMock(return_value=pipe_mock)
         redis_mock.pipeline = MagicMock(return_value=pipe_mock)
 
         registry = StreamRegistry(redis=redis_mock, session_maker=session_maker_mock)
@@ -239,6 +240,37 @@ class TestStreamRegistryUpdateStatus:
 
         session_mock.execute.assert_called()
         session_mock.commit.assert_called()
+
+
+class TestStreamRegistryStopRequest:
+    @pytest.mark.asyncio
+    async def test_request_stop_is_shared_and_marks_stopping(
+        self, redis_mock, session_maker_mock
+    ):
+        redis_mock.hgetall = AsyncMock(
+            return_value={
+                "id": "stream-1",
+                "instance_id": "process-1",
+                "config": "{}",
+            }
+        )
+        registry = StreamRegistry(redis=redis_mock, session_maker=session_maker_mock)
+
+        await registry.request_stop("stream-1")
+
+        redis_mock.set.assert_awaited_once()
+        assert redis_mock.set.await_args.args[0] == "stream:stop-request:stream-1"
+        status_mapping = redis_mock.hset.await_args.kwargs["mapping"]
+        assert status_mapping["status"] == "stopping"
+        assert status_mapping["instance_id"] == "process-1"
+
+    @pytest.mark.asyncio
+    async def test_is_stop_requested(self, redis_mock, session_maker_mock):
+        redis_mock.exists = AsyncMock(return_value=1)
+        registry = StreamRegistry(redis=redis_mock, session_maker=session_maker_mock)
+
+        assert await registry.is_stop_requested("stream-1") is True
+        redis_mock.exists.assert_awaited_once_with("stream:stop-request:stream-1")
 
 
 class MagicMockWrapper:

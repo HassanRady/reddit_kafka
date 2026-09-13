@@ -1,12 +1,57 @@
 
+data "aws_caller_identity" "current" {}
+
+data "aws_iam_policy_document" "kms" {
+  statement {
+    sid     = "AllowAccountRoot"
+    effect  = "Allow"
+    actions = ["kms:*"]
+    resources = ["*"]
+    principals {
+      type        = "AWS"
+      identifiers = ["arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"]
+    }
+  }
+
+  statement {
+    sid     = "AllowSecretsManager"
+    effect  = "Allow"
+    actions = [
+      "kms:Decrypt",
+      "kms:Encrypt",
+      "kms:GenerateDataKey*",
+      "kms:DescribeKey"
+    ]
+    resources = ["*"]
+    principals {
+      type        = "Service"
+      identifiers = ["secretsmanager.amazonaws.com"]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "kms:CallerAccount"
+      values   = [data.aws_caller_identity.current.account_id]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "kms:ViaService"
+      values   = ["secretsmanager.${var.aws_region}.amazonaws.com"]
+    }
+  }
+}
+
 resource "random_password" "rds_master" {
   length  = 32
   special = true
+  override_special = "!#$%&'()*+,-.:;<=>?[]^_`{|}~"
 }
 
 resource "random_password" "redis_auth" {
   length  = 32
-  special = true
+  special = false # ElastiCache requires alphanumeric only
+  upper   = true
+  lower   = true
+  numeric = true
 }
 
 resource "random_password" "kafka_sasl" {
@@ -19,6 +64,7 @@ resource "aws_kms_key" "main" {
   description             = "KMS key for ${local.name}"
   deletion_window_in_days = 7
   enable_key_rotation     = true
+  policy                  = data.aws_iam_policy_document.kms.json
 }
 resource "aws_kms_alias" "main" {
   count         = var.enable_kms_encryption ? 1 : 0
@@ -201,7 +247,7 @@ resource "aws_db_subnet_group" "main" {
 resource "aws_rds_cluster" "main" {
   cluster_identifier              = local.name
   engine                          = "aurora-postgresql"
-  engine_version                  = "15.4"
+  engine_version                  = "16.13"
   database_name                   = var.postgres_db_name
   master_username                 = var.postgres_user
   master_password                 = local.rds_master_password
@@ -211,7 +257,7 @@ resource "aws_rds_cluster" "main" {
   final_snapshot_identifier       = var.environment != "dev" ? "${local.name}-final" : null
   storage_encrypted               = var.enable_kms_encryption
   kms_key_id                      = var.enable_kms_encryption ? aws_kms_key.main[0].arn : null
-  backup_retention_period         = var.environment == "prod" ? 30 : 7
+  backup_retention_period         = 1 # Free tier limited to 1 day for dev
   preferred_backup_window         = "02:00-03:00"
   preferred_maintenance_window    = "sun:03:00-sun:04:00"
   deletion_protection             = var.environment == "prod"
@@ -247,10 +293,23 @@ resource "aws_elasticache_replication_group" "redis" {
   subnet_group_name          = aws_elasticache_subnet_group.redis.name
   at_rest_encryption_enabled = var.enable_kms_encryption
   kms_key_id                 = var.enable_kms_encryption ? aws_kms_key.main[0].arn : null
-  transit_encryption_enabled = true
-  auth_token                 = local.redis_auth_token
+  transit_encryption_enabled = var.enable_kms_encryption
+  auth_token                 = var.enable_kms_encryption ? local.redis_auth_token : ""
   snapshot_retention_limit   = 5
   snapshot_window            = "02:00-03:00"
+  apply_immediately          = true
+  log_delivery_configuration {
+    destination      = aws_cloudwatch_log_group.redis_engine.name
+    destination_type = "cloudwatch-logs"
+    log_type         = "engine-log"
+    log_format       = "text"
+  }
+  log_delivery_configuration {
+    destination      = aws_cloudwatch_log_group.redis_slow.name
+    destination_type = "cloudwatch-logs"
+    log_type         = "slow-log"
+    log_format       = "text"
+  }
   tags                       = { Name = local.name }
 }
 resource "aws_msk_configuration" "main" {
@@ -261,7 +320,7 @@ resource "aws_msk_configuration" "main" {
 resource "aws_msk_cluster" "main" {
   cluster_name           = local.name
   kafka_version          = "3.6.0"
-  number_of_broker_nodes = 3
+  number_of_broker_nodes = 2 # Must be a multiple of private_subnet_cidrs (2 AZs)
 
   broker_node_group_info {
     instance_type   = "kafka.t3.small"
@@ -294,19 +353,41 @@ resource "aws_msk_cluster" "main" {
     revision = aws_msk_configuration.main.latest_revision
   }
 
+  logging_info {
+    broker_logs {
+      cloudwatch_logs {
+        enabled   = true
+        log_group = aws_cloudwatch_log_group.msk.name
+      }
+    }
+  }
+
   tags = { Name = local.name }
 }
 resource "aws_ecr_repository" "app" {
   name                 = "${local.name}-app"
-  image_tag_mutability = "IMMUTABLE"
+  image_tag_mutability = "MUTABLE"
   image_scanning_configuration {
     scan_on_push = true
   }
   encryption_configuration {
-    encryption_type = var.enable_kms_encryption ? "KMS" : "AES256"
-    kms_key         = var.enable_kms_encryption ? aws_kms_key.main[0].arn : null
+    encryption_type = "AES256"
   }
-  tags = { Name = local.name }
+
+  # Suppress tags to avoid ecr:TagResource permissions error
+  tags = {
+    Name        = null
+    Project     = null
+    Environment = null
+    ManagedBy   = null
+  }
+
+  lifecycle {
+    # Ignore tag changes to avoid permission issues in limited IAM environments
+    ignore_changes = [tags_all]
+    # The workflow may pre-create this repository for image pushes; never let Terraform delete it.
+    prevent_destroy = true
+  }
 }
 resource "aws_ecr_lifecycle_policy" "app" {
   repository = aws_ecr_repository.app.name
@@ -328,7 +409,22 @@ resource "aws_ecr_lifecycle_policy" "app" {
 resource "aws_cloudwatch_log_group" "ecs" {
   name              = "/ecs/${local.name}"
   retention_in_days = var.log_retention_days
-  kms_key_id        = var.enable_kms_encryption ? aws_kms_key.main[0].arn : null
+  # Not setting kms_key_id here unless we configure the KMS key policy to allow logs service
+  tags = { Name = local.name }
+}
+resource "aws_cloudwatch_log_group" "msk" {
+  name              = "/msk/${local.name}"
+  retention_in_days = var.log_retention_days
+  tags              = { Name = local.name }
+}
+resource "aws_cloudwatch_log_group" "redis_engine" {
+  name              = "/elasticache/${local.name}/engine"
+  retention_in_days = var.log_retention_days
+  tags              = { Name = local.name }
+}
+resource "aws_cloudwatch_log_group" "redis_slow" {
+  name              = "/elasticache/${local.name}/slow"
+  retention_in_days = var.log_retention_days
   tags              = { Name = local.name }
 }
 resource "aws_iam_role" "ecs_task_execution_role" {
@@ -341,6 +437,19 @@ resource "aws_iam_role" "ecs_task_execution_role" {
       Principal = { Service = "ecs-tasks.amazonaws.com" }
     }]
   })
+
+  # Suppress tags to avoid iam:TagRole permissions error
+  tags = {
+    Name        = null
+    Project     = null
+    Environment = null
+    ManagedBy   = null
+  }
+
+  lifecycle {
+    # Ignore tag changes to avoid permission issues in limited IAM environments
+    ignore_changes = [tags_all]
+  }
 }
 resource "aws_iam_role_policy_attachment" "ecs_task_execution_role_policy" {
   role       = aws_iam_role.ecs_task_execution_role.name
@@ -356,6 +465,19 @@ resource "aws_iam_role" "ecs_task_role" {
       Principal = { Service = "ecs-tasks.amazonaws.com" }
     }]
   })
+
+  # Suppress tags to avoid iam:TagRole permissions error
+  tags = {
+    Name        = null
+    Project     = null
+    Environment = null
+    ManagedBy   = null
+  }
+
+  lifecycle {
+    # Ignore tag changes to avoid permission issues in limited IAM environments
+    ignore_changes = [tags_all]
+  }
 }
 resource "aws_iam_role_policy" "ecs_task_policy" {
   name = "${local.name}-ecs-task-policy"
@@ -366,9 +488,16 @@ resource "aws_iam_role_policy" "ecs_task_policy" {
       Effect = "Allow"
       Action = [
         "logs:CreateLogStream",
-        "logs:PutLogEvents"
+        "logs:PutLogEvents",
+        "glue:GetSchema",
+        "glue:GetSchemaVersion",
+        "glue:GetSchemaByDefinition"
       ]
-      Resource = "${aws_cloudwatch_log_group.ecs.arn}:*"
+      Resource = [
+        "${aws_cloudwatch_log_group.ecs.arn}:*",
+        "arn:aws:glue:${var.aws_region}:${data.aws_caller_identity.current.account_id}:registry/${var.schema_registry_name}",
+        "arn:aws:glue:${var.aws_region}:${data.aws_caller_identity.current.account_id}:schema/${var.schema_registry_name}/${var.schema_name}"
+      ]
     }]
   })
 }
@@ -393,14 +522,14 @@ resource "aws_secretsmanager_secret_version" "redis_password" {
   secret_string = local.redis_auth_token
 }
 
-resource "aws_secretsmanager_secret" "reddit_credentials" {
-  name                    = "${local.name}/reddit/credentials"
-  recovery_window_in_days = 7
+data "aws_secretsmanager_secret" "reddit_credentials" {
+  name = "${local.name}/reddit/credentials"
 }
 
 resource "aws_secretsmanager_secret" "kafka_scram" {
-  name                    = "${local.name}/kafka/scram"
+  name                    = "AmazonMSK_${local.name}/kafka/scram"
   recovery_window_in_days = 7
+  kms_key_id              = var.enable_kms_encryption ? aws_kms_key.main[0].arn : null
 }
 
 resource "aws_secretsmanager_secret_version" "kafka_scram" {
@@ -430,9 +559,26 @@ resource "aws_iam_role_policy" "ecs_task_execution_secrets" {
       Resource = [
         aws_secretsmanager_secret.postgres_password.arn,
         aws_secretsmanager_secret.redis_password.arn,
-        aws_secretsmanager_secret.reddit_credentials.arn,
+        data.aws_secretsmanager_secret.reddit_credentials.arn,
         aws_secretsmanager_secret.kafka_scram.arn
       ]
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "ecs_task_execution_kms" {
+  count = var.enable_kms_encryption ? 1 : 0
+  name  = "${local.name}-ecs-execution-kms"
+  role  = aws_iam_role.ecs_task_execution_role.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = [
+        "kms:Decrypt",
+        "kms:DescribeKey"
+      ]
+      Resource = aws_kms_key.main[0].arn
     }]
   })
 }
@@ -454,9 +600,9 @@ resource "aws_lb_target_group" "app" {
   target_type = "ip"
   health_check {
     healthy_threshold   = 2
-    unhealthy_threshold = 2
-    timeout             = 3
-    interval            = 30
+    unhealthy_threshold = 5
+    timeout             = 10
+    interval            = 20
     path                = "/health"
     matcher             = "200"
   }
@@ -537,7 +683,7 @@ resource "aws_ecs_task_definition" "app" {
       }
     }
     environment = [
-      { name = "POSTGRES_HOST", value = aws_rds_cluster.main.reader_endpoint },
+      { name = "POSTGRES_HOST", value = aws_rds_cluster.main.endpoint },
       { name = "POSTGRES_PORT", value = "5432" },
       { name = "POSTGRES_DB", value = var.postgres_db_name },
       { name = "POSTGRES_USER", value = var.postgres_user },
@@ -545,6 +691,7 @@ resource "aws_ecs_task_definition" "app" {
       { name = "REDIS_HOST", value = aws_elasticache_replication_group.redis.primary_endpoint_address },
       { name = "REDIS_PORT", value = "6379" },
       { name = "REDIS_USER", value = var.redis_user },
+      { name = "REDIS_USE_SSL", value = tostring(var.enable_kms_encryption) },
       { name = "KAFKA_BOOTSTRAP_SERVERS", value = aws_msk_cluster.main.bootstrap_brokers_sasl_scram },
       { name = "KAFKA_SECURITY_PROTOCOL", value = var.kafka_security_protocol },
       { name = "KAFKA_SASL_MECHANISM", value = "SCRAM-SHA-512" },
@@ -553,11 +700,11 @@ resource "aws_ecs_task_definition" "app" {
 
       { name = "SCHEMA_REGISTRY_NAME", value = var.schema_registry_name },
       { name = "SCHEMA_NAME", value = var.schema_name },
-      { name = "SCHEMA_VERSION", value = var.schema_version },
+      { name = "SCHEMA_VERSION", value = tostring(var.schema_version) },
       { name = "AWS_REGION", value = var.aws_region },
-      { name = "USE_LOCALSTACK", value = var.use_localstack },
-      { name = "DB_FLUSH_INTERVAL", value = var.db_flush_interval },
-      { name = "DEAD_STREAM_CLEANUP_INTERVAL", value = var.dead_stream_cleanup_interval },
+      { name = "USE_LOCALSTACK", value = tostring(var.use_localstack) },
+      { name = "DB_FLUSH_INTERVAL", value = tostring(var.db_flush_interval) },
+      { name = "DEAD_STREAM_CLEANUP_INTERVAL", value = tostring(var.dead_stream_cleanup_interval) },
       { name = "LOG_LEVEL", value = var.log_level }
 
 
@@ -565,10 +712,10 @@ resource "aws_ecs_task_definition" "app" {
     secrets = [
       { name = "POSTGRES_PASSWORD", valueFrom = aws_secretsmanager_secret.postgres_password.arn },
       { name = "REDIS_PASSWORD", valueFrom = aws_secretsmanager_secret.redis_password.arn },
-      { name = "REDDIT_CLIENT_ID", valueFrom = aws_secretsmanager_secret.reddit_credentials.arn, key = "client_id" },
-      { name = "REDDIT_CLIENT_SECRET", valueFrom = aws_secretsmanager_secret.reddit_credentials.arn, key = "client_secret" },
-      { name = "KAFKA_SASL_USERNAME", valueFrom = aws_secretsmanager_secret.kafka_scram.arn, key = "username" },
-      { name = "KAFKA_SASL_PASSWORD", valueFrom = aws_secretsmanager_secret.kafka_scram.arn, key = "password" }
+      { name = "REDDIT_CLIENT_ID", valueFrom = "${data.aws_secretsmanager_secret.reddit_credentials.arn}:REDDIT_CLIENT_ID::" },
+      { name = "REDDIT_CLIENT_SECRET", valueFrom = "${data.aws_secretsmanager_secret.reddit_credentials.arn}:REDDIT_CLIENT_SECRET::" },
+      { name = "KAFKA_SASL_USERNAME", valueFrom = "${aws_secretsmanager_secret.kafka_scram.arn}:username::" },
+      { name = "KAFKA_SASL_PASSWORD", valueFrom = "${aws_secretsmanager_secret.kafka_scram.arn}:password::" }
     ]
   }])
   tags = { Name = local.name }
@@ -579,7 +726,7 @@ resource "aws_ecs_service" "app" {
   task_definition                    = aws_ecs_task_definition.app.arn
   desired_count                      = var.app_desired_count
   enable_execute_command             = true
-  health_check_grace_period_seconds  = 60
+  health_check_grace_period_seconds  = 300
   deployment_minimum_healthy_percent = 50
   deployment_maximum_percent         = 200
   deployment_circuit_breaker {

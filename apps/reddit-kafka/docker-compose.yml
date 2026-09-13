@@ -1,59 +1,54 @@
 services:
-  zookeeper:
-    image: confluentinc/cp-zookeeper:7.0.1
-    container_name: zookeeper
-    environment:
-      ZOOKEEPER_CLIENT_PORT: 2181
-      ZOOKEEPER_TICK_TIME: 2000
-    healthcheck:
-      test: ["CMD-SHELL", "nc -z localhost 2181"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    ports:
-      - "2181:2181"
-
   broker:
-    image: confluentinc/cp-kafka:7.0.1
-    container_name: broker
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: reddit-broker
     ports:
       - "9092:9092"
-    depends_on:
-      zookeeper:
-        condition: service_healthy
+    volumes:
+      - kafka_data:/var/lib/kafka/data
     environment:
-      KAFKA_BROKER_ID: 1
-      KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_INTERNAL:PLAINTEXT
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: 'broker,controller'
+      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@broker:29093'
+      KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
+
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,PLAINTEXT_INTERNAL://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,PLAINTEXT_INTERNAL://broker:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_INTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT_INTERNAL
+
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
     healthcheck:
-      test: ["CMD-SHELL", "nc -z localhost 9092"]
+      test: ["CMD-SHELL", "kafka-cluster cluster-id --bootstrap-server localhost:9092"]
       interval: 10s
-      timeout: 5s
-      retries: 5
+      timeout: 10s
+      retries: 10
 
   init-kafka:
-    image: confluentinc/cp-kafka:7.0.1
+    image: confluentinc/cp-kafka:7.6.0
     depends_on:
       broker:
         condition: service_healthy
-    entrypoint: [ '/bin/sh', '-c' ]
-    command: |
-      "
-      # Wait for the broker to be ready
-      echo 'Waiting for Kafka...'
-      cub kafka-ready -b broker:29092 1 20
-
-      echo 'Creating topic: ${KAFKA_RAW_TEXT_TOPIC}'
-      kafka-topics --bootstrap-server broker:29092 --create --if-not-exists --topic ${KAFKA_RAW_TEXT_TOPIC} --replication-factor 1 --partitions 3
-      "
+    environment:
+      KAFKA_RAW_TEXT_TOPIC: ${KAFKA_RAW_TEXT_TOPIC:-reddit_raw_comments}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        kafka-topics \
+          --bootstrap-server broker:29092 \
+          --create \
+          --if-not-exists \
+          --topic "$${KAFKA_RAW_TEXT_TOPIC}" \
+          --replication-factor 1 \
+          --partitions 3
+    restart: "no"
 
   postgres:
-    image: postgres:15-alpine
-    container_name: postgres
+    image: postgres:16-alpine
+    container_name: reddit-postgres
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-local}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
@@ -71,7 +66,7 @@ services:
   migrate:
     build:
       context: .
-    container_name: migrate
+    container_name: reddit-migrate
     env_file:
       - .env
     environment:
@@ -85,7 +80,7 @@ services:
 
   redis:
     image: redis:7-alpine
-    container_name: redis
+    container_name: reddit-redis
     command: [ "redis-server", "--aclfile", "/etc/redis/users.acl" ]
     volumes:
       - ./users.acl:/etc/redis/users.acl
@@ -95,7 +90,7 @@ services:
   app:
     build:
       context: .
-    container_name: app
+    container_name: reddit-app
     env_file:
       - .env
     environment:
@@ -108,8 +103,8 @@ services:
     ports:
       - "8000:8000"
     depends_on:
-      broker:
-        condition: service_healthy
+      init-kafka:
+        condition: service_completed_successfully
       redis:
         condition: service_started
       postgres:
@@ -119,3 +114,4 @@ services:
 
 volumes:
   postgres_data:
+  kafka_data:

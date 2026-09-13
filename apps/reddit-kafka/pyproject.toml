@@ -1,3 +1,46 @@
+[project]
+name = "reddit-kafka"
+version = "0.1.0"
+description = "On-demand Reddit streaming service backed by Kafka"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "aiohttp==3.14.3",
+    "asyncpg",
+    "asyncpraw",
+    "aws-glue-schema-registry",
+    "boto3",
+    "confluent-kafka",
+    "fastapi",
+    "kafka-python-ng",
+    "praw",
+    "pydantic-settings==2.14.2",
+    "redis",
+    "sqlalchemy",
+    "starlette==1.0.1",
+    "uvicorn",
+]
+
+[dependency-groups]
+dev = [
+    "mypy",
+    "pre-commit",
+    "pytest",
+    "pytest-asyncio",
+    "pytest-cov",
+    "pytest-mock",
+    "ruff",
+]
+
+[tool.uv]
+package = false
+# Keep this migration on the existing dependency snapshot.
+exclude-newer = "2026-09-13T14:44:09Z"
+
+[tool.pytest.ini_options]
+markers = [
+    "e2e: tests requiring the containerized Kafka, Redis, PostgreSQL, and app stack",
+]
+
 [tool.ruff]
 target-version = "py312"
 line-length = 88

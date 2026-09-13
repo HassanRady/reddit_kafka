@@ -1,22 +1,19 @@
 FROM python:3.12-slim AS builder
 
+COPY --from=ghcr.io/astral-sh/uv:0.11.24 /uv /uvx /bin/
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PROJECT_ENVIRONMENT=/opt/venv
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir pipenv
+COPY pyproject.toml uv.lock ./
 
-COPY Pipfile Pipfile.lock ./
-
-RUN pipenv requirements > requirements.txt
-
-RUN python -m venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
-
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
-
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev --no-install-project
 
 FROM python:3.12-slim AS runtime
 
