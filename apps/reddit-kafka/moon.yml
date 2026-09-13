@@ -1,9 +1,8 @@
 language: 'python'
-type: 'application'
 
 tasks:
   install:
-    command: 'pipenv install --dev'
+    command: 'pipenv sync --dev'
     inputs:
       - 'Pipfile'
       - 'Pipfile.lock'
@@ -13,10 +12,17 @@ tasks:
     inputs:
       - 'src/**/*'
       - 'tests/**/*'
-    outputs:
-      - 'junit.xml'
 
-  lint:
+
+  format:
     command: 'pipenv run ruff format src'
     inputs:
       - 'src/**/*'
+      - 'pyproject.toml'
+
+  lint:
+    command: 'pipenv run ruff check src tests'
+    inputs:
+      - 'src/**/*'
+      - 'tests/**/*'
+      - 'pyproject.toml'
