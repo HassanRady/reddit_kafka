@@ -71,6 +71,10 @@ class StreamRegistry:
     def _checkpoint_key(stream_id: str) -> str:
         return f"stream:checkpoint:{stream_id}"
 
+    @staticmethod
+    def _stop_request_key(stream_id: str) -> str:
+        return f"stream:stop-request:{stream_id}"
+
     async def create_stream(
         self,
         subreddit: str,
@@ -225,6 +229,20 @@ class StreamRegistry:
             except Exception:
                 logger.exception("Failed to update stream status in Postgres")
 
+    async def request_stop(self, stream_id: str) -> None:
+        """Persist a stop request that can be observed by another process."""
+        meta = await self.get_stream(stream_id)
+        await self._redis.set(self._stop_request_key(stream_id), _now_iso())
+        await self.update_status(
+            stream_id,
+            "stopping",
+            instance_id=meta.get("instance_id") or None,
+        )
+
+    async def is_stop_requested(self, stream_id: str) -> bool:
+        """Return whether a shared stop request exists for the stream."""
+        return bool(await self._redis.exists(self._stop_request_key(stream_id)))
+
     async def delete_stream(self, stream_id: str) -> None:
         meta = await self._redis.hgetall(self._meta_key(stream_id))
         if not meta:
@@ -233,6 +251,7 @@ class StreamRegistry:
         pipe = self._redis.pipeline()
         pipe.delete(self._meta_key(stream_id))
         pipe.delete(self._checkpoint_key(stream_id))
+        pipe.delete(self._stop_request_key(stream_id))
         if subreddit:
             pipe.delete(self._subreddit_key(subreddit))
         # Remove from stream tracking set
