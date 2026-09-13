@@ -76,3 +76,39 @@ class TestCircuitBreaker:
         # ErrorHandler.get_backoff_duration returns 60 for TooManyRequests,
         # and the breaker picks the max(suggested, backoff*multiplier)
         assert breaker.backoff_seconds == 60
+
+    @pytest.mark.asyncio
+    async def test_progress_resets_failures_before_long_running_call_returns(self):
+        breaker = CircuitBreaker(failure_threshold=3, recovery_timeout=60)
+
+        async def failing_call():
+            raise ConnectionError("transient disconnect")
+
+        for _ in range(2):
+            with pytest.raises(ConnectionError):
+                await breaker.call(failing_call)
+
+        assert breaker.fail_count == 2
+
+        await breaker.record_success()
+
+        assert breaker.state == CircuitState.CLOSED
+        assert breaker.fail_count == 0
+
+    @pytest.mark.asyncio
+    async def test_progress_closes_half_open_circuit_at_success_threshold(self):
+        breaker = CircuitBreaker(success_threshold=2, recovery_timeout=10)
+        breaker.state = CircuitState.HALF_OPEN
+        breaker.failure_count = 5
+        breaker.backoff_seconds = 20
+
+        await breaker.record_success()
+
+        assert breaker.state == CircuitState.HALF_OPEN
+        assert breaker.success_count == 1
+        assert breaker.fail_count == 0
+
+        await breaker.record_success()
+
+        assert breaker.state == CircuitState.CLOSED
+        assert breaker.backoff_seconds == breaker.recovery_timeout

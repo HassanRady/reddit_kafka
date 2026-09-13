@@ -181,6 +181,12 @@ class StreamWorker:
 
                 if comment is None:
                     continue
+
+                # A yielded comment proves that the long-lived Reddit stream is
+                # healthy. Report progress now because this coroutine normally
+                # runs forever and CircuitBreaker.call() cannot wait for it to
+                # return before clearing transient failure history.
+                await self.circuit_breaker.record_success()
                 await self._process_comment(comment, checkpoint)
         except asyncio.CancelledError:
             raise

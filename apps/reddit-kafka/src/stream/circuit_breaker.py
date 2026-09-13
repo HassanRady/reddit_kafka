@@ -88,13 +88,22 @@ class CircuitBreaker:
 
         try:
             result = await coro_factory()
-            async with self._lock:
-                self._record_success()
+            await self.record_success()
             return result
         except Exception as e:
             async with self._lock:
                 self._record_failure(e)
             raise
+
+    async def record_success(self) -> None:
+        """Record successful progress without requiring the wrapped call to return.
+
+        Long-running operations can use this as a health signal whenever they make
+        meaningful progress. It also advances HALF_OPEN recovery using the same
+        rules as a successfully completed call.
+        """
+        async with self._lock:
+            self._record_success()
 
     def _should_attempt_reset(self) -> bool:
         """Check if enough time has passed to try half-open."""
