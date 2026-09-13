@@ -34,6 +34,11 @@ package = false
 # Keep this migration on the existing dependency snapshot.
 exclude-newer = "2026-05-20T14:44:09Z"
 
+[tool.pytest.ini_options]
+markers = [
+    "e2e: tests requiring the containerized Kafka, Redis, PostgreSQL, and app stack",
+]
+
 [tool.ruff]
 target-version = "py312"
 line-length = 88

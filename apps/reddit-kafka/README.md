@@ -136,6 +136,28 @@ uv run --frozen mypy src
 uv run --frozen ruff check src
 ```
 
+### End-to-end tests
+
+The E2E suite starts two independent application containers and real Kafka,
+Redis, and PostgreSQL services. It verifies migrations, API health, stream
+creation and duplicate rejection, Kafka delivery, Redis and PostgreSQL
+checkpoints, cross-instance termination, lock release, and that production stops
+after termination.
+
+Reddit and AWS Glue are replaced at their application boundaries with deterministic
+test doubles, so the suite needs no cloud credentials and does not depend on live
+Reddit availability. The production application, worker, Kafka producer, state
+stores, migrations, and multi-instance control flow remain unchanged.
+
+Run the suite from `apps/reddit-kafka`:
+
+```bash
+./scripts/run-e2e.sh
+```
+
+On failure, service state and recent logs are printed automatically. Set
+`E2E_KEEP_STACK=1` to leave the containers running for diagnosis.
+
 ---
 
 ## Configuration

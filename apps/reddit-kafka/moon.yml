@@ -13,6 +13,18 @@ tasks:
       - 'src/**/*'
       - 'tests/**/*'
 
+  e2e:
+    command: './scripts/run-e2e.sh'
+    local: true
+    inputs:
+      - 'Dockerfile'
+      - 'docker-compose.e2e.yml'
+      - 'migrations/**/*'
+      - 'schemas/**/*'
+      - 'scripts/run-e2e.sh'
+      - 'src/**/*'
+      - 'tests/e2e/**/*'
+
 
   format:
     command: 'uv run --frozen ruff format src'

@@ -1,0 +1,146 @@
+x-app: &app
+  build:
+    context: .
+  command:
+    - /bin/sh
+    - -c
+    - uvicorn e2e_harness:app --host 0.0.0.0 --port 8000 --workers 1
+  environment: &app-environment
+    REDDIT_CLIENT_ID: e2e-client
+    REDDIT_CLIENT_SECRET: e2e-secret
+    REDDIT_USER_AGENT: reddit-kafka-e2e
+    REDIS_HOST: redis
+    REDIS_PORT: "6379"
+    REDIS_USER: local
+    REDIS_PASSWORD: password
+    POSTGRES_HOST: postgres
+    POSTGRES_PORT: "5432"
+    POSTGRES_USER: local
+    POSTGRES_PASSWORD: password
+    POSTGRES_DB: reddit_stream_e2e
+    KAFKA_BOOTSTRAP_SERVERS: broker:29092
+    KAFKA_RAW_TEXT_TOPIC: reddit_e2e_comments
+    KAFKA_SECURITY_PROTOCOL: PLAINTEXT
+    SCHEMA_REGISTRY_NAME: e2e-registry
+    SCHEMA_NAME: RedditComment
+    SCHEMA_VERSION: "1"
+    AWS_REGION: us-east-1
+    USE_LOCALSTACK: "false"
+    DB_FLUSH_INTERVAL: "1"
+    DEAD_STREAM_CLEANUP_INTERVAL: "3600"
+    LOG_LEVEL: INFO
+  volumes:
+    - ./tests/e2e/harness_app.py:/app/e2e_harness.py:ro
+  depends_on:
+    init-kafka:
+      condition: service_completed_successfully
+    migrate:
+      condition: service_completed_successfully
+    redis:
+      condition: service_healthy
+  healthcheck:
+    test:
+      - CMD
+      - python
+      - -c
+      - import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)
+    interval: 2s
+    timeout: 3s
+    retries: 30
+    start_period: 5s
+
+services:
+  broker:
+    image: confluentinc/cp-kafka:7.6.0
+    ports:
+      - "${E2E_KAFKA_PORT:-19092}:9092"
+    environment:
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@broker:29093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,PLAINTEXT_INTERNAL://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:${E2E_KAFKA_PORT:-19092},PLAINTEXT_INTERNAL://broker:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_INTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT_INTERNAL
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - kafka-cluster cluster-id --bootstrap-server broker:29092
+      interval: 5s
+      timeout: 10s
+      retries: 30
+
+  init-kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    depends_on:
+      broker:
+        condition: service_healthy
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        kafka-topics \
+          --bootstrap-server broker:29092 \
+          --create \
+          --if-not-exists \
+          --topic reddit_e2e_comments \
+          --replication-factor 1 \
+          --partitions 3
+    restart: "no"
+
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "${E2E_POSTGRES_PORT:-15432}:5432"
+    environment:
+      POSTGRES_USER: local
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: reddit_stream_e2e
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U local -d reddit_stream_e2e"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  migrate:
+    build:
+      context: .
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: local
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: reddit_stream_e2e
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["python", "-m", "src.migrations"]
+    restart: "no"
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--aclfile", "/etc/redis/users.acl"]
+    volumes:
+      - ./users.acl:/etc/redis/users.acl:ro
+    ports:
+      - "${E2E_REDIS_PORT:-16379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  app-a:
+    <<: *app
+    ports:
+      - "${E2E_APP_A_PORT:-18001}:8000"
+
+  app-b:
+    <<: *app
+    ports:
+      - "${E2E_APP_B_PORT:-18002}:8000"
