@@ -24,6 +24,8 @@ env:
 
 jobs:
   determine-env:
+    # Temporary kill switch: remove this condition to re-enable CD.
+    if: ${{ false }}
     name: Determine Environment
     runs-on: ubuntu-latest
     outputs:
