@@ -18,6 +18,7 @@ def redis_mock():
     mock.lpush = AsyncMock()
     mock.ltrim = AsyncMock()
     mock.expire = AsyncMock()
+    mock.eval = AsyncMock()
     mock.llen = AsyncMock()
     mock.lrange = AsyncMock()
     pipeline_mock = MagicMock()

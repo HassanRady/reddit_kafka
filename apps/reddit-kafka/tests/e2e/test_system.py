@@ -3,7 +3,7 @@ import json
 import os
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 from urllib.error import HTTPError
 from urllib.parse import quote
@@ -39,6 +39,25 @@ def eventually(
         except (AssertionError, KeyError, TypeError) as error:
             last_error = error
             time.sleep(interval)
+    if last_error is not None:
+        raise last_error
+    raise AssertionError("condition was not satisfied")
+
+
+async def eventually_async(
+    assertion: Callable[[], Awaitable[Any]],
+    *,
+    timeout: float = 20,
+    interval: float = 0.1,
+) -> Any:
+    deadline = time.monotonic() + timeout
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        try:
+            return await assertion()
+        except (AssertionError, KeyError, TypeError) as error:
+            last_error = error
+            await asyncio.sleep(interval)
     if last_error is not None:
         raise last_error
     raise AssertionError("condition was not satisfied")
@@ -83,6 +102,12 @@ async def database_row(query: str, *args: Any) -> asyncpg.Record | None:
         await connection.close()
 
 
+async def required_database_row(query: str, *args: Any) -> asyncpg.Record:
+    row = await database_row(query, *args)
+    assert row is not None, "database row was not persisted"
+    return row
+
+
 def kafka_record(consumer: Consumer) -> dict[str, Any]:
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
@@ -106,7 +131,8 @@ def kafka_high_watermark(consumer: Consumer) -> int:
     )
 
 
-def test_complete_stream_lifecycle_across_two_app_instances() -> None:
+@pytest.mark.asyncio
+async def test_complete_stream_lifecycle_across_two_app_instances() -> None:
     assert api_request(APP_A, "GET", "/health") == {"status": "ok"}
     assert api_request(APP_B, "GET", "/health") == {"status": "ok"}
     api_request(APP_B, "POST", "/streams/missing/stop", expected_status=404)
@@ -170,18 +196,10 @@ def test_complete_stream_lifecycle_across_two_app_instances() -> None:
         )
         assert checkpoint["last_comment_id"].startswith("e2e-comment-")
 
-        persisted_checkpoint = eventually(
-            lambda: (
-                asyncio.run(
-                    database_row(
-                        "SELECT last_comment_id FROM stream_checkpoints "
-                        "WHERE stream_id = $1",
-                        stream_id,
-                    )
-                )
-                or (_ for _ in ()).throw(
-                    AssertionError("checkpoint not flushed to PostgreSQL")
-                )
+        persisted_checkpoint = await eventually_async(
+            lambda: required_database_row(
+                "SELECT last_comment_id FROM stream_checkpoints WHERE stream_id = $1",
+                stream_id,
             ),
             timeout=30,
         )
@@ -209,12 +227,9 @@ def test_complete_stream_lifecycle_across_two_app_instances() -> None:
             timeout=10,
         )
 
-        database_stream = eventually(
-            lambda: (
-                asyncio.run(
-                    database_row("SELECT status FROM streams WHERE id = $1", stream_id)
-                )
-                or (_ for _ in ()).throw(AssertionError("stream missing in PostgreSQL"))
+        database_stream = await eventually_async(
+            lambda: required_database_row(
+                "SELECT status FROM streams WHERE id = $1", stream_id
             )
         )
         assert database_stream["status"] == "stopped"

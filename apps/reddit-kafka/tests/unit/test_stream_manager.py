@@ -47,7 +47,8 @@ async def test_non_local_stop_cancels_runner_in_owning_manager() -> None:
     runner_started = asyncio.Event()
     runner_cancelled = asyncio.Event()
 
-    async def owner_runner(subreddit: str) -> None:
+    async def owner_runner(subreddit: str, lock_token: str | None) -> None:
+        del subreddit, lock_token
         runner_started.set()
         try:
             await asyncio.Event().wait()

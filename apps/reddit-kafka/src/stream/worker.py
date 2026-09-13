@@ -48,6 +48,7 @@ class StreamWorker:
         stream_id: str,
         kafka_topic: str,
         schema_settings: SchemaSettings,
+        lock_token: str,
     ) -> None:
         """
         Args:
@@ -60,6 +61,7 @@ class StreamWorker:
             stream_id: Stream UUID
             kafka_topic: Kafka topic to produce to
             schema_settings: SchemaSettings for Avro serialization
+            lock_token: Exact ownership token returned when the lease was acquired
         """
         self.subreddit = subreddit
         self.reddit_client = reddit_client
@@ -70,6 +72,7 @@ class StreamWorker:
         self.stream_id = stream_id
         self.kafka_topic = kafka_topic
         self.schema_settings = schema_settings
+        self.lock_token = lock_token
 
         self.circuit_breaker = CircuitBreaker(
             failure_threshold=5,
@@ -145,7 +148,7 @@ class StreamWorker:
                     logger.error(f"Error saving final checkpoint: {e}")
 
             try:
-                await self.lock_manager.release_lock(self.subreddit, self.instance_id)
+                await self.lock_manager.release_lock(self.subreddit, self.lock_token)
                 logger.info(f"✓ Released lock for {self.subreddit}")
             except Exception as e:
                 logger.error(f"Error releasing lock: {e}")
@@ -267,7 +270,7 @@ class StreamWorker:
                 await asyncio.sleep(self.lock_refresh_interval)
                 success = await self.lock_manager.refresh_lock(
                     self.subreddit,
-                    self.instance_id,
+                    self.lock_token,
                     ttl=60,
                 )
                 if not success:

@@ -80,8 +80,11 @@ async def _create_runner(
     kafka_topic = settings.kafka.raw_text_topic
     schema_settings = settings.schema_settings
 
-    async def runner(subreddit: str) -> None:
+    async def runner(subreddit: str, lock_token: str | None) -> None:
         """Runner that creates a StreamWorker and runs it."""
+        if lock_token is None:
+            raise RuntimeError(f"No lock token supplied for subreddit {subreddit}")
+
         stream_meta = await registry.get_stream_by_subreddit(subreddit)
         if not stream_meta:
             raise RuntimeError(f"Stream not found for subreddit {subreddit}")
@@ -98,6 +101,7 @@ async def _create_runner(
             stream_id=stream_id,
             kafka_topic=kafka_topic,
             schema_settings=schema_settings,
+            lock_token=lock_token,
         )
 
         try:
