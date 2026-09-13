@@ -16,7 +16,7 @@ dependencies = [
     "pydantic-settings==2.14.2",
     "redis",
     "sqlalchemy",
-    "starlette==1.3.0",
+    "starlette==1.6.0",
     "uvicorn",
 ]
 
