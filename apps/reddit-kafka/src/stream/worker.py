@@ -376,9 +376,7 @@ class StreamWorker:
             # reflects liveness while the worker is running. Failures here do
             # not affect the Redis lease and therefore are non-fatal.
             try:
-                await self.registry.update_status(
-                    self.stream_id, "active", instance_id=self.instance_id
-                )
+                await self.registry.heartbeat(self.stream_id, self.instance_id)
             except Exception:
                 logger.debug(
                     "Failed to update registry heartbeat for %s",

@@ -7,6 +7,7 @@ import pytest_asyncio
 
 from src.repositories.stream_registry import (
     _DELETE_STREAM_IF_UNCHANGED_SCRIPT,
+    _HEARTBEAT_IF_ACTIVE_SCRIPT,
     StreamExistsError,
     StreamNotFoundError,
     StreamRegistry,
@@ -264,6 +265,26 @@ class TestStreamRegistryUpdateStatus:
 
         session_mock.execute.assert_called()
         session_mock.commit.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_only_updates_redis(self, redis_mock, session_maker_mock):
+        redis_mock.eval.return_value = 1
+        registry = StreamRegistry(redis=redis_mock, session_maker=session_maker_mock)
+
+        refreshed = await registry.heartbeat("stream-1", "instance-1")
+
+        assert refreshed is True
+        redis_mock.eval.assert_awaited_once()
+        heartbeat_call = redis_mock.eval.await_args
+        assert heartbeat_call.args[0] == _HEARTBEAT_IF_ACTIVE_SCRIPT
+        assert heartbeat_call.args[1:4] == (
+            2,
+            "stream:meta:stream-1",
+            "streams:instance:instance-1",
+        )
+        assert heartbeat_call.args[4] == "instance-1"
+        assert heartbeat_call.args[6] == "stream-1"
+        session_maker_mock.assert_not_called()
 
 
 class TestStreamRegistryStopRequest:

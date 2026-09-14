@@ -148,10 +148,31 @@ def make_lock_test_worker() -> StreamWorker:
     worker.lock_refresh_timeout = 1
     worker._stop_event = asyncio.Event()
     worker.registry = SimpleNamespace(
-        update_status=AsyncMock(),
+        heartbeat=AsyncMock(),
     )
     worker._save_checkpoint = AsyncMock()
     return worker
+
+
+@pytest.mark.asyncio
+async def test_lock_refresh_records_redis_heartbeat() -> None:
+    worker = make_lock_test_worker()
+    refresh_count = 0
+
+    async def refresh_lock(*args, **kwargs) -> bool:
+        nonlocal refresh_count
+        del args, kwargs
+        refresh_count += 1
+        if refresh_count == 1:
+            return True
+        raise asyncio.CancelledError
+
+    worker.lock_manager = SimpleNamespace(refresh_lock=refresh_lock)
+
+    with pytest.raises(asyncio.CancelledError):
+        await worker._lock_refresh_loop()
+
+    worker.registry.heartbeat.assert_awaited_once_with("stream-1", "process-1")
 
 
 @pytest.mark.asyncio

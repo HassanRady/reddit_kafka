@@ -34,6 +34,18 @@ end
 return 1
 """
 
+_HEARTBEAT_IF_ACTIVE_SCRIPT = """
+if redis.call("hget", KEYS[1], "instance_id") ~= ARGV[1] then
+    return 0
+end
+if redis.call("hget", KEYS[1], "status") ~= "active" then
+    return 0
+end
+redis.call("hset", KEYS[1], "updated_at", ARGV[2])
+redis.call("sadd", KEYS[2], ARGV[3])
+return 1
+"""
+
 _default_session_maker: Callable[[], Any] | None = None
 
 with suppress(Exception):
@@ -273,6 +285,22 @@ class StreamRegistry:
                     await session.commit()
             except Exception:
                 logger.exception("Failed to update stream status in Postgres")
+
+    async def heartbeat(self, stream_id: str, instance_id: str) -> bool:
+        """Refresh liveness in Redis without writing to PostgreSQL."""
+        refreshed = await cast(
+            Awaitable[int],
+            self._redis.eval(
+                _HEARTBEAT_IF_ACTIVE_SCRIPT,
+                2,
+                self._meta_key(stream_id),
+                f"streams:instance:{instance_id}",
+                instance_id,
+                _now_iso(),
+                stream_id,
+            ),
+        )
+        return bool(refreshed)
 
     async def request_stop(self, stream_id: str) -> None:
         """Persist a stop request that can be observed by another process."""
