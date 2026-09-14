@@ -252,7 +252,7 @@ class StreamWorker:
             self.comments_since_checkpoint += 1
             if self.comments_since_checkpoint >= self.checkpoint_interval:
                 await self._save_checkpoint_for_comment(comment)
-                self.kafka_producer.flush()
+                await asyncio.to_thread(self.kafka_producer.flush)
                 self.comments_since_checkpoint = 0
         except asyncio.CancelledError:
             raise

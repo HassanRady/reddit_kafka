@@ -117,6 +117,34 @@ def _get_kafka_producer_from_settings(settings: Settings) -> Producer:
     return _get_kafka_producer(_build_kafka_producer_config(settings))
 
 
+async def _flush_kafka_producer(timeout: float = 5.0) -> None:
+    """Flush and release the shared producer after all workers have stopped."""
+    global _kafka_producer
+
+    kafka_producer = _kafka_producer
+    if kafka_producer is None:
+        return
+
+    try:
+        remaining_messages = await asyncio.to_thread(
+            kafka_producer.flush, timeout=timeout
+        )
+        if remaining_messages:
+            logger.warning(
+                "Kafka producer shutdown timed out with %d message(s) still queued",
+                remaining_messages,
+            )
+        else:
+            logger.info("✓ Kafka producer flushed")
+    except Exception:
+        logger.exception("Error flushing Kafka producer during shutdown")
+    finally:
+        # A new lifespan must create a new producer rather than reuse the
+        # instance whose delivery queue has already been drained.
+        if _kafka_producer is kafka_producer:
+            _kafka_producer = None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> Any:
     global _reddit_client
@@ -191,6 +219,8 @@ async def lifespan(app: FastAPI) -> Any:
     if hasattr(app.state, "manager"):
         await app.state.manager.stop_all()
         logger.info("✓ All streams stopped")
+
+    await _flush_kafka_producer()
 
     # Flush any remaining checkpoints to Postgres before stopping the flusher
     if hasattr(app.state, "flusher"):

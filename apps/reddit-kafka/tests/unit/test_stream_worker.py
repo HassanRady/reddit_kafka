@@ -1,9 +1,10 @@
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+import src.stream.worker as worker_module
 from src.stream.circuit_breaker import CircuitBreaker
 from src.stream.worker import LockLostError, StreamWorker
 
@@ -52,6 +53,41 @@ async def test_received_comment_resets_failures_while_stream_remains_open() -> N
         stream_task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await stream_task
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_flush_does_not_block_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    comment = SimpleNamespace(
+        id="comment-1",
+        author=SimpleNamespace(name="author-1"),
+        body="message",
+    )
+    kafka_producer = MagicMock()
+    to_thread = AsyncMock(
+        side_effect=lambda function, *args, **kwargs: function(*args, **kwargs)
+    )
+
+    worker = StreamWorker.__new__(StreamWorker)
+    worker.subreddit = "python"
+    worker.stream_id = "stream-1"
+    worker.kafka_topic = "raw-text"
+    worker.kafka_producer = kafka_producer
+    worker.serializer = MagicMock()
+    worker.serializer.serialize.return_value = b"serialized-message"
+    worker.checkpoint_interval = 100
+    worker.comments_since_checkpoint = 99
+    worker._save_checkpoint_for_comment = AsyncMock()
+    worker.error_handler = SimpleNamespace(record_error=AsyncMock())
+    monkeypatch.setattr(worker_module.asyncio, "to_thread", to_thread)
+
+    await worker._process_comment(comment, {})
+
+    worker._save_checkpoint_for_comment.assert_awaited_once_with(comment)
+    to_thread.assert_awaited_once_with(kafka_producer.flush)
+    kafka_producer.flush.assert_called_once_with()
+    assert worker.comments_since_checkpoint == 0
 
 
 def make_lock_test_worker() -> StreamWorker:
