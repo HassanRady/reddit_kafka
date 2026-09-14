@@ -6,7 +6,8 @@ import pytest
 
 import src.stream.worker as worker_module
 from src.stream.circuit_breaker import CircuitBreaker
-from src.stream.worker import KafkaDeliveryError, LockLostError, StreamWorker
+from src.stream.exceptions import KafkaDeliveryError
+from src.stream.worker import LockLostError, StreamWorker
 
 
 @pytest.mark.asyncio

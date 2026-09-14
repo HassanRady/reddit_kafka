@@ -19,6 +19,7 @@ from src.repositories.stream_registry import StreamRegistry
 from src.serializers.avro_serializer import get_serializer
 from src.stream.circuit_breaker import CircuitBreaker
 from src.stream.error_handler import ErrorHandler, RecoveryStrategy
+from src.stream.exceptions import KafkaDeliveryError
 from src.stream.lock import DistributedLockManager
 
 logger = logging.getLogger(__name__)
@@ -26,10 +27,6 @@ logger = logging.getLogger(__name__)
 
 class LockLostError(RuntimeError):
     """Raised when a worker can no longer prove ownership of its lock."""
-
-
-class KafkaDeliveryError(RuntimeError):
-    """Raised when Kafka cannot accept or deliver a produced message."""
 
 
 class StreamWorker:

@@ -1,11 +1,18 @@
 """Unit tests for ErrorHandler."""
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from aiohttp import ClientConnectorError
+from asyncprawcore.exceptions import (
+    NotFound,
+    RequestException,
+    ResponseException,
+    TooManyRequests,
+)
 
 from src.stream.error_handler import ErrorHandler, RecoveryStrategy
-from src.stream.worker import KafkaDeliveryError
+from src.stream.exceptions import KafkaDeliveryError
 
 
 class TestErrorHandlerRecordError:
@@ -61,7 +68,25 @@ class TestRecoveryStrategy:
     """Test recovery strategy determination."""
 
     def test_should_retry_immediately_for_transient_error(self):
-        error = ConnectionError("Network error")
+        class ServiceConnectionError(ConnectionError):
+            pass
+
+        error = ServiceConnectionError("Network error")
+        assert RecoveryStrategy.should_retry_immediately(error)
+
+    def test_should_retry_immediately_for_connector_error(self):
+        error = ClientConnectorError(None, OSError("Connection refused"))
+        assert RecoveryStrategy.should_retry_immediately(error)
+
+    def test_should_retry_immediately_for_wrapped_request_error(self):
+        error = RequestException(OSError("Connection refused"), (), {})
+        assert RecoveryStrategy.should_retry_immediately(error)
+
+    def test_should_retry_immediately_for_response_exception_subclass(self):
+        class TemporaryResponseError(ResponseException):
+            pass
+
+        error = TemporaryResponseError(MagicMock())
         assert RecoveryStrategy.should_retry_immediately(error)
 
     def test_should_abandon_stream_for_kafka_delivery_error(self):
@@ -69,17 +94,17 @@ class TestRecoveryStrategy:
         assert RecoveryStrategy.should_abandon_stream(error)
 
     def test_should_retry_with_backoff_for_rate_limit(self):
-        class TooManyRequestsError(Exception):
+        class CustomTooManyRequests(TooManyRequests):
             pass
 
-        TooManyRequestsError.__name__ = "TooManyRequests"
-        error = TooManyRequestsError("Rate limited")
+        error = CustomTooManyRequests(MagicMock())
         assert RecoveryStrategy.should_retry_with_backoff(error)
+        assert ErrorHandler.get_backoff_duration(error) == 60
 
     def test_should_abandon_stream_for_fatal_error(self):
-        class NotFoundError(Exception):
+        class CustomNotFound(NotFound):
             pass
 
-        NotFoundError.__name__ = "NotFound"
-        error = NotFoundError("Subreddit not found")
+        error = CustomNotFound(MagicMock())
         assert RecoveryStrategy.should_abandon_stream(error)
+        assert not ErrorHandler.is_retryable(error)

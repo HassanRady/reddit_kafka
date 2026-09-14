@@ -1,6 +1,8 @@
 from datetime import UTC, datetime, timedelta
+from unittest.mock import MagicMock
 
 import pytest
+from asyncprawcore.exceptions import TooManyRequests
 
 from src.stream.circuit_breaker import CircuitBreaker, CircuitState
 
@@ -59,17 +61,19 @@ class TestCircuitBreaker:
 
     @pytest.mark.asyncio
     async def test_rate_limit_error_sets_suggested_backoff(self):
-        class TooManyRequestsError(Exception):
+        class CustomTooManyRequests(TooManyRequests):
             pass
 
-        TooManyRequestsError.__name__ = "TooManyRequests"
+        response = MagicMock()
+        response.status = 429
+        error = CustomTooManyRequests(response)
 
         breaker = CircuitBreaker(failure_threshold=1, recovery_timeout=10)
 
         async def failing_call():
-            raise TooManyRequestsError("rate limited")
+            raise error
 
-        with pytest.raises(TooManyRequestsError):
+        with pytest.raises(CustomTooManyRequests):
             await breaker.call(failing_call)
 
         assert breaker.state == CircuitState.OPEN

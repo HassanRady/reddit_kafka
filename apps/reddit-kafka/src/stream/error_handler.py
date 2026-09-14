@@ -7,7 +7,20 @@ from datetime import UTC, datetime
 from typing import Any
 
 import redis.asyncio as redis
+from aiohttp import ClientConnectionError
+from asyncprawcore.exceptions import (
+    BadRequest,
+    Forbidden,
+    InvalidToken,
+    NotFound,
+    OAuthException,
+    RequestException,
+    ResponseException,
+    TooManyRequests,
+)
 from sqlalchemy import text
+
+from src.stream.exceptions import KafkaDeliveryError
 
 _default_session_maker: Callable[[], Any] | None = None
 
@@ -15,6 +28,24 @@ with suppress(Exception):
     from src.db import get_session as _default_session_maker
 
 logger = logging.getLogger(__name__)
+
+_FATAL_EXCEPTIONS = (
+    BadRequest,
+    Forbidden,
+    InvalidToken,
+    NotFound,
+    OAuthException,
+    ValueError,
+    KafkaDeliveryError,
+)
+_BACKOFF_EXCEPTIONS = (TooManyRequests,)
+_RETRYABLE_EXCEPTIONS = (
+    ConnectionError,
+    TimeoutError,
+    ClientConnectionError,
+    RequestException,
+    ResponseException,
+)
 
 
 class ErrorHandler:
@@ -170,18 +201,9 @@ class ErrorHandler:
         Returns:
             True if retryable, False if fatal
         """
-        # Retryable errors (transient)
-        retryable_types = [
-            "ConnectionError",
-            "TimeoutError",
-            "TooManyRequests",
-            "RequestException",
-            "SuspiciousActivity",  # Reddit temporary ban
-            "ResponseException",
-        ]
-
-        error_type = error.__class__.__name__
-        return error_type in retryable_types
+        return not isinstance(error, _FATAL_EXCEPTIONS) and isinstance(
+            error, _RETRYABLE_EXCEPTIONS
+        )
 
     @staticmethod
     def should_backoff(error: Exception) -> bool:
@@ -193,8 +215,7 @@ class ErrorHandler:
         Returns:
             True if backoff is needed
         """
-        backoff_types = ["TooManyRequests", "RateLimitError"]
-        return error.__class__.__name__ in backoff_types
+        return isinstance(error, _BACKOFF_EXCEPTIONS)
 
     @staticmethod
     def get_backoff_duration(error: Exception) -> int:
@@ -206,15 +227,9 @@ class ErrorHandler:
         Returns:
             Recommended backoff in seconds
         """
-        error_type = error.__class__.__name__
-
-        # Rate limit errors require aggressive backoff
-        if error_type == "TooManyRequests":
+        if isinstance(error, TooManyRequests):
             return 60  # Start with 60s, exponential backoff will increase
-        elif error_type == "RateLimitError":
-            return 30
-        else:
-            return 5  # Default short backoff for network errors
+        return 5  # Default short backoff for network errors
 
 
 class RecoveryStrategy:
@@ -237,12 +252,4 @@ class RecoveryStrategy:
     @staticmethod
     def should_abandon_stream(error: Exception) -> bool:
         """Determine if error is fatal and stream should be abandoned."""
-        non_retryable = [
-            "NotFound",
-            "BadRequest",
-            "Forbidden",
-            "InvalidCredentials",
-            "ValueError",
-            "KafkaDeliveryError",
-        ]
-        return error.__class__.__name__ in non_retryable
+        return isinstance(error, _FATAL_EXCEPTIONS)
