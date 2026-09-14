@@ -28,6 +28,10 @@ class LockLostError(RuntimeError):
     """Raised when a worker can no longer prove ownership of its lock."""
 
 
+class KafkaDeliveryError(RuntimeError):
+    """Raised when Kafka cannot accept or deliver a produced message."""
+
+
 class StreamWorker:
     """
     Cancel-safe worker for streaming Reddit comments.
@@ -95,6 +99,7 @@ class StreamWorker:
 
         self.checkpoint_interval = 100
         self.comments_since_checkpoint = 0
+        self._delivery_errors: list[str] = []
         self.lock_refresh_interval = 30
         self.lock_ttl = 60
         self.lock_refresh_timeout = 10
@@ -242,19 +247,27 @@ class StreamWorker:
             if serialized_message is None:
                 raise ValueError("Serializer returned no payload")
 
-            self.kafka_producer.produce(
-                self.kafka_topic,
-                serialized_message,
-            )
-            self.kafka_producer.poll(0)
+            try:
+                self.kafka_producer.produce(
+                    self.kafka_topic,
+                    serialized_message,
+                    on_delivery=self._on_delivery,
+                )
+                self.kafka_producer.poll(0)
+            except Exception as e:
+                raise KafkaDeliveryError(
+                    f"Kafka rejected comment {comment.id}: {e}"
+                ) from e
 
             # Update checkpoint every N comments
             self.comments_since_checkpoint += 1
             if self.comments_since_checkpoint >= self.checkpoint_interval:
+                await self._flush_delivery_batch()
                 await self._save_checkpoint_for_comment(comment)
-                await asyncio.to_thread(self.kafka_producer.flush)
                 self.comments_since_checkpoint = 0
         except asyncio.CancelledError:
+            raise
+        except KafkaDeliveryError:
             raise
         except Exception as e:
             logger.exception(f"Error processing comment {comment.id}: {e}")
@@ -263,6 +276,42 @@ class StreamWorker:
                 "CommentProcessingError",
                 str(e),
                 is_recoverable=True,
+            )
+
+    def _on_delivery(self, error: Any, message: Any) -> None:
+        """Record asynchronous delivery failures reported by librdkafka."""
+        del message
+        if error is None:
+            return
+
+        error_message = str(error)
+        self._delivery_errors.append(error_message)
+        logger.error(
+            "Kafka delivery failed for stream %s: %s",
+            self.stream_id,
+            error_message,
+        )
+
+    async def _flush_delivery_batch(self) -> None:
+        """Wait for batch delivery and fail before advancing its checkpoint."""
+        try:
+            remaining_messages = await asyncio.to_thread(self.kafka_producer.flush)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            raise KafkaDeliveryError(f"Kafka flush failed: {e}") from e
+
+        delivery_errors = self._delivery_errors
+        self._delivery_errors = []
+
+        if remaining_messages:
+            raise KafkaDeliveryError(
+                f"Kafka flush left {remaining_messages} message(s) queued"
+            )
+        if delivery_errors:
+            raise KafkaDeliveryError(
+                f"Kafka failed to deliver {len(delivery_errors)} message(s): "
+                f"{delivery_errors[0]}"
             )
 
     async def _handle_fetch_exception(self, error: Exception) -> None:

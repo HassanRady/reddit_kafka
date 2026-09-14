@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from src.stream.error_handler import ErrorHandler, RecoveryStrategy
+from src.stream.worker import KafkaDeliveryError
 
 
 class TestErrorHandlerRecordError:
@@ -62,6 +63,10 @@ class TestRecoveryStrategy:
     def test_should_retry_immediately_for_transient_error(self):
         error = ConnectionError("Network error")
         assert RecoveryStrategy.should_retry_immediately(error)
+
+    def test_should_abandon_stream_for_kafka_delivery_error(self):
+        error = KafkaDeliveryError("Broker rejected message")
+        assert RecoveryStrategy.should_abandon_stream(error)
 
     def test_should_retry_with_backoff_for_rate_limit(self):
         class TooManyRequestsError(Exception):

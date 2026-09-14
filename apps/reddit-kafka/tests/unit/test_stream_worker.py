@@ -6,7 +6,7 @@ import pytest
 
 import src.stream.worker as worker_module
 from src.stream.circuit_breaker import CircuitBreaker
-from src.stream.worker import LockLostError, StreamWorker
+from src.stream.worker import KafkaDeliveryError, LockLostError, StreamWorker
 
 
 @pytest.mark.asyncio
@@ -65,6 +65,7 @@ async def test_checkpoint_flush_does_not_block_event_loop(
         body="message",
     )
     kafka_producer = MagicMock()
+    kafka_producer.flush.return_value = 0
     to_thread = AsyncMock(
         side_effect=lambda function, *args, **kwargs: function(*args, **kwargs)
     )
@@ -78,6 +79,7 @@ async def test_checkpoint_flush_does_not_block_event_loop(
     worker.serializer.serialize.return_value = b"serialized-message"
     worker.checkpoint_interval = 100
     worker.comments_since_checkpoint = 99
+    worker._delivery_errors = []
     worker._save_checkpoint_for_comment = AsyncMock()
     worker.error_handler = SimpleNamespace(record_error=AsyncMock())
     monkeypatch.setattr(worker_module.asyncio, "to_thread", to_thread)
@@ -87,7 +89,52 @@ async def test_checkpoint_flush_does_not_block_event_loop(
     worker._save_checkpoint_for_comment.assert_awaited_once_with(comment)
     to_thread.assert_awaited_once_with(kafka_producer.flush)
     kafka_producer.flush.assert_called_once_with()
+    kafka_producer.produce.assert_called_once_with(
+        "raw-text",
+        b"serialized-message",
+        on_delivery=worker._on_delivery,
+    )
     assert worker.comments_since_checkpoint == 0
+
+
+@pytest.mark.asyncio
+async def test_delivery_failure_does_not_advance_checkpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    comment = SimpleNamespace(
+        id="comment-1",
+        author=SimpleNamespace(name="author-1"),
+        body="message",
+    )
+    kafka_producer = MagicMock()
+
+    def flush() -> int:
+        delivery_callback = kafka_producer.produce.call_args.kwargs["on_delivery"]
+        delivery_callback(RuntimeError("broker rejected message"), MagicMock())
+        return 0
+
+    to_thread = AsyncMock(side_effect=lambda function: function())
+    kafka_producer.flush.side_effect = flush
+
+    worker = StreamWorker.__new__(StreamWorker)
+    worker.subreddit = "python"
+    worker.stream_id = "stream-1"
+    worker.kafka_topic = "raw-text"
+    worker.kafka_producer = kafka_producer
+    worker.serializer = MagicMock()
+    worker.serializer.serialize.return_value = b"serialized-message"
+    worker.checkpoint_interval = 100
+    worker.comments_since_checkpoint = 99
+    worker._delivery_errors = []
+    worker._save_checkpoint_for_comment = AsyncMock()
+    worker.error_handler = SimpleNamespace(record_error=AsyncMock())
+    monkeypatch.setattr(worker_module.asyncio, "to_thread", to_thread)
+
+    with pytest.raises(KafkaDeliveryError, match="broker rejected message"):
+        await worker._process_comment(comment, {})
+
+    worker._save_checkpoint_for_comment.assert_not_awaited()
+    assert worker.comments_since_checkpoint == 100
 
 
 def make_lock_test_worker() -> StreamWorker:

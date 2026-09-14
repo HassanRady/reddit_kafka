@@ -243,5 +243,6 @@ class RecoveryStrategy:
             "Forbidden",
             "InvalidCredentials",
             "ValueError",
+            "KafkaDeliveryError",
         ]
         return error.__class__.__name__ in non_retryable
