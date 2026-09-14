@@ -3,8 +3,9 @@
 import asyncio
 import logging
 import uuid
+from collections.abc import Awaitable
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 
 import redis.asyncio as redis
 from sqlalchemy import text
@@ -20,16 +21,20 @@ class CheckpointFlusher:
         self,
         redis_client: redis.Redis,
         session_maker: async_sessionmaker[AsyncSession],
+        instance_id: str,
         flush_interval: int = 10,
     ) -> None:
         """
         Args:
             redis_client: Async Redis client
             session_maker: SQLAlchemy async session factory
+            instance_id: ID of the application instance whose streams are flushed
             flush_interval: Seconds between flushes (default: 10s)
         """
         self.redis = redis_client
         self.session_maker = session_maker
+        self.instance_id = instance_id
+        self.stream_index_key = f"streams:instance:{instance_id}"
         self.flush_interval = flush_interval
         self._running = False
         self._task: asyncio.Task[Any] | None = None
@@ -90,27 +95,30 @@ class CheckpointFlusher:
 
     async def flush(self) -> None:
         try:
-            # Get all checkpoint keys from Redis using SCAN (non-blocking)
-            pattern = "stream:checkpoint:*"
-            keys = []
-            async for key in self.redis.scan_iter(match=pattern):
-                keys.append(key)
-
-            if not keys:
+            stream_ids = await self.redis.smembers(self.stream_index_key)  # type: ignore
+            if not stream_ids:
                 return
 
-            checkpoints_to_upsert = []
+            checkpoints_to_upsert: list[dict[str, Any]] = []
+            stale_stream_ids: list[str] = []
 
-            # Batch hgetall calls through pipeline
+            # Fetch ownership metadata and checkpoints in one Redis round trip.
             pipe = self.redis.pipeline()
-            for key in keys:
-                pipe.hgetall(key)
+            for stream_id in stream_ids:
+                pipe.hgetall(f"stream:meta:{stream_id}")
+                pipe.hgetall(f"stream:checkpoint:{stream_id}")
 
             results = await pipe.execute()
 
-            for key, checkpoint_data in zip(keys, results, strict=True):
-                # key format: "stream:checkpoint:{stream_id}"
-                stream_id = key.split(":")[-1]
+            for index, stream_id in enumerate(stream_ids):
+                meta = results[index * 2]
+                checkpoint_data = results[index * 2 + 1]
+
+                # Ownership can move between instances. Discard stale index
+                # entries instead of allowing an old instance to flush them.
+                if not meta or meta.get("instance_id") != self.instance_id:
+                    stale_stream_ids.append(stream_id)
+                    continue
 
                 if not checkpoint_data:
                     continue
@@ -126,6 +134,12 @@ class CheckpointFlusher:
                         "last_comment_id": parsed["last_comment_id"],
                         "last_processed_at": parsed["last_processed_at"],
                     }
+                )
+
+            if stale_stream_ids:
+                await cast(
+                    Awaitable[int],
+                    self.redis.srem(self.stream_index_key, *stale_stream_ids),
                 )
 
             if checkpoints_to_upsert:
@@ -159,16 +173,16 @@ class CheckpointFlusher:
                         updated_at = NOW()
                 """
 
-                for checkpoint in checkpoints:
-                    await session.execute(
-                        text(stmt),
-                        {
-                            "id": checkpoint.get("id") or str(uuid.uuid4()),
-                            "stream_id": checkpoint["stream_id"],
-                            "last_comment_id": checkpoint.get("last_comment_id"),
-                            "last_processed_at": checkpoint.get("last_processed_at"),
-                        },
-                    )
+                parameters = [
+                    {
+                        "id": checkpoint.get("id") or str(uuid.uuid4()),
+                        "stream_id": checkpoint["stream_id"],
+                        "last_comment_id": checkpoint.get("last_comment_id"),
+                        "last_processed_at": checkpoint.get("last_processed_at"),
+                    }
+                    for checkpoint in checkpoints
+                ]
+                await session.execute(text(stmt), parameters)
 
                 await session.commit()
                 logger.debug(f"Flushed {len(checkpoints)} checkpoints to Postgres")

@@ -1,16 +1,28 @@
 import asyncio
+import hashlib
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from time import monotonic
+from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError, OperationalError
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from src.config import PostgresSettings
 from src.db import close_db, get_engine, init_db
 
 MAX_MIGRATION_WAIT_SECONDS = 600
 MIGRATION_RETRY_DELAY_SECONDS = 10
+MIGRATION_LOCK_ID = 728_194_632
+
+_CREATE_SCHEMA_MIGRATIONS_SQL = """
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version VARCHAR(255) PRIMARY KEY,
+    checksum VARCHAR(64) NOT NULL,
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+)
+"""
 
 
 def _is_retryable_migration_error(error: Exception) -> bool:
@@ -64,6 +76,60 @@ async def _run_with_retry(operation: Callable[[], Awaitable[None]]) -> None:
             await asyncio.sleep(sleep_seconds)
 
 
+async def _execute_sql_script(connection: AsyncConnection, raw_sql: str) -> None:
+    """Execute a complete SQL file without splitting it into statements."""
+    if not raw_sql.strip():
+        return
+
+    raw_connection = await connection.get_raw_connection()
+    driver_connection: Any = raw_connection.driver_connection
+    await driver_connection.execute(raw_sql)
+
+
+async def _apply_migration_files(
+    connection: AsyncConnection, migration_files: list[Path]
+) -> None:
+    """Apply pending migrations and record their checksums atomically."""
+    await connection.execute(
+        text("SELECT pg_advisory_xact_lock(:lock_id)"),
+        {"lock_id": MIGRATION_LOCK_ID},
+    )
+    await connection.execute(text(_CREATE_SCHEMA_MIGRATIONS_SQL))
+
+    result = await connection.execute(
+        text("SELECT version, checksum FROM schema_migrations")
+    )
+    applied = {row["version"]: row["checksum"] for row in result.mappings()}
+
+    for migration_file in migration_files:
+        version = migration_file.name
+        raw_bytes = migration_file.read_bytes()
+        raw_sql = raw_bytes.decode("utf-8")
+        checksum = hashlib.sha256(raw_bytes).hexdigest()
+
+        if version in applied:
+            if applied[version] != checksum:
+                raise RuntimeError(
+                    f"Applied migration {version} has been modified; "
+                    "create a new migration instead"
+                )
+            print(f"Skipping migration already applied: {version}")
+            continue
+
+        print(f"Running migration: {version}")
+        await _execute_sql_script(connection, raw_sql)
+        await connection.execute(
+            text(
+                """
+                INSERT INTO schema_migrations (version, checksum)
+                VALUES (:version, :checksum)
+                """
+            ),
+            {"version": version, "checksum": checksum},
+        )
+        print(f"✓ {version} completed")
+
+
 async def run_migrations(settings: PostgresSettings) -> None:
     """Run all SQL migration files in migrations/ directory."""
     migrations_dir = Path(__file__).parent.parent / "migrations"
@@ -77,16 +143,7 @@ async def run_migrations(settings: PostgresSettings) -> None:
             raise RuntimeError("Engine not initialized")
 
         async with engine.begin() as conn:
-            for migration_file in migration_files:
-                print(f"Running migration: {migration_file.name}")
-                raw_sql = migration_file.read_text()
-                statements = [
-                    stmt.strip() for stmt in raw_sql.split(";") if stmt.strip()
-                ]
-
-                for statement in statements:
-                    await conn.execute(text(statement))
-                print(f"✓ {migration_file.name} completed")
+            await _apply_migration_files(conn, migration_files)
 
     await _run_with_retry(execute_migrations)
 

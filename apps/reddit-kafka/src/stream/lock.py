@@ -2,10 +2,26 @@
 
 import logging
 import uuid
+from collections.abc import Awaitable
+from typing import cast
 
 import redis.asyncio as redis
 
 logger = logging.getLogger(__name__)
+
+_REFRESH_IF_OWNER_SCRIPT = """
+if redis.call("get", KEYS[1]) == ARGV[1] then
+    return redis.call("expire", KEYS[1], ARGV[2])
+end
+return 0
+"""
+
+_DELETE_IF_OWNER_SCRIPT = """
+if redis.call("get", KEYS[1]) == ARGV[1] then
+    return redis.call("del", KEYS[1])
+end
+return 0
+"""
 
 
 class DistributedLockManager:
@@ -32,7 +48,7 @@ class DistributedLockManager:
         subreddit: str,
         instance_id: str,
         ttl: int = 60,
-    ) -> bool:
+    ) -> str | None:
         """Acquire a distributed lock for a subreddit.
 
         Args:
@@ -41,85 +57,86 @@ class DistributedLockManager:
             ttl: Lock TTL in seconds (default 60s)
 
         Returns:
-            True if lock acquired, False if already held
+            An opaque ownership token if acquired, otherwise None. The caller must
+            use this exact token to refresh or release the lease.
         """
         key = self._lock_key(subreddit)
-        token = str(uuid.uuid4())
+        owner_token = f"{instance_id}:{uuid.uuid4()}"
 
         acquired = await self.redis.set(
             key,
-            f"{instance_id}:{token}",
+            owner_token,
             nx=True,
             ex=ttl,
         )
 
         if acquired:
             logger.debug(f"✓ Acquired lock for {subreddit} (instance={instance_id})")
-            return True
+            return owner_token
         else:
             holder = await self.redis.get(key)
             logger.warning(
                 f"✗ Lock already held for {subreddit} by {holder or 'unknown'}"
             )
-            return False
+            return None
 
     async def refresh_lock(
         self,
         subreddit: str,
-        instance_id: str,
+        owner_token: str,
         ttl: int = 60,
     ) -> bool:
         """Refresh an existing lock (extend TTL).
 
         Args:
             subreddit: Subreddit name
-            instance_id: Instance ID that holds the lock
+            owner_token: Exact opaque token returned by acquire_lock
             ttl: New TTL in seconds
 
         Returns:
             True if refreshed successfully, False if lock token doesn't match
         """
         key = self._lock_key(subreddit)
-        current = await self.redis.get(key)
-
-        if not current:
-            logger.warning(f"✗ Lock expired for {subreddit}")
-            return False
-
-        if not current.startswith(instance_id):
-            logger.warning(
-                f"✗ Cannot refresh lock for {subreddit}: held by {current}, "
-                f"not {instance_id}"
-            )
-            return False
-
-        success = await self.redis.expire(key, ttl)
+        success = await cast(
+            Awaitable[int],
+            self.redis.eval(
+                _REFRESH_IF_OWNER_SCRIPT,
+                1,
+                key,
+                owner_token,
+                ttl,
+            ),
+        )
         if success:
             logger.debug(f"✓ Refreshed lock for {subreddit}")
+        else:
+            logger.warning(f"✗ Cannot refresh unowned or expired lock for {subreddit}")
         return bool(success)
 
-    async def release_lock(self, subreddit: str, instance_id: str) -> bool:
+    async def release_lock(self, subreddit: str, owner_token: str) -> bool:
         """Release a lock (delete from Redis).
 
         Args:
             subreddit: Subreddit name
-            instance_id: Instance ID that holds the lock
+            owner_token: Exact opaque token returned by acquire_lock
 
         Returns:
             True if released, False if not held by this instance
         """
         key = self._lock_key(subreddit)
-        current = await self.redis.get(key)
-
-        if not current or not current.startswith(instance_id):
-            logger.warning(
-                f"✗ Cannot release lock for {subreddit}: not held by {instance_id}"
-            )
-            return False
-
-        deleted = await self.redis.delete(key)
+        deleted = await cast(
+            Awaitable[int],
+            self.redis.eval(
+                _DELETE_IF_OWNER_SCRIPT,
+                1,
+                key,
+                owner_token,
+            ),
+        )
         if deleted:
             logger.debug(f"✓ Released lock for {subreddit}")
+        else:
+            logger.warning(f"✗ Cannot release unowned or expired lock for {subreddit}")
         return bool(deleted)
 
     async def is_locked(self, subreddit: str) -> bool:

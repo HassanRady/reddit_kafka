@@ -1,11 +1,13 @@
 import json
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
 
 from src.repositories.stream_registry import (
+    _DELETE_STREAM_IF_UNCHANGED_SCRIPT,
+    _HEARTBEAT_IF_ACTIVE_SCRIPT,
     StreamExistsError,
     StreamNotFoundError,
     StreamRegistry,
@@ -42,6 +44,7 @@ class TestStreamRegistryCreateStream:
     async def test_create_stream_success(self, redis_mock, session_maker_mock):
         """Test successful stream creation."""
         redis_mock.set = AsyncMock(return_value=True)
+        redis_mock.get = AsyncMock(return_value=None)
         redis_mock.hset = AsyncMock()
 
         registry = StreamRegistry(redis=redis_mock, session_maker=session_maker_mock)
@@ -52,8 +55,9 @@ class TestStreamRegistryCreateStream:
             instance_id="instance-1",
         )
 
-        redis_mock.set.assert_called_once()
+        assert redis_mock.set.await_count == 2
         redis_mock.hset.assert_called_once()
+        redis_mock.sadd.assert_any_await("streams:instance:instance-1", meta["id"])
 
         assert meta["subreddit"] == "python"
         assert meta["status"] == "starting"
@@ -66,7 +70,6 @@ class TestStreamRegistryCreateStream:
     async def test_create_stream_duplicate_raises_error(
         self, redis_mock, session_maker_mock
     ):
-        redis_mock.set = AsyncMock(return_value=False)
         redis_mock.get = AsyncMock(return_value="existing-stream-id")
 
         registry = StreamRegistry(redis=redis_mock, session_maker=session_maker_mock)
@@ -79,6 +82,7 @@ class TestStreamRegistryCreateStream:
         self, redis_mock, session_mock, session_maker_mock
     ):
         redis_mock.set = AsyncMock(return_value=True)
+        redis_mock.get = AsyncMock(return_value=None)
         redis_mock.hset = AsyncMock()
 
         registry = StreamRegistry(redis=redis_mock, session_maker=session_maker_mock)
@@ -97,6 +101,7 @@ class TestStreamRegistryCreateStream:
     async def test_create_stream_without_session_maker(self, redis_mock):
         """Test stream creation without session maker (Redis-only mode)."""
         redis_mock.set = AsyncMock(return_value=True)
+        redis_mock.get = AsyncMock(return_value=None)
         redis_mock.hset = AsyncMock()
 
         registry = StreamRegistry(redis=redis_mock, session_maker=None)
@@ -140,6 +145,46 @@ class TestStreamRegistryGetStream:
 
         with pytest.raises(StreamNotFoundError):
             await registry.get_stream("nonexistent")
+
+
+class TestStreamRegistryListStreams:
+    @pytest.mark.asyncio
+    async def test_list_streams_uses_tracking_set(self, redis_mock, registry):
+        redis_mock.smembers.return_value = ["stream-1", "stream-2"]
+        redis_mock.pipeline.return_value.execute.return_value = [
+            {"id": "stream-1", "config": '{"limit": 10}'},
+            {"id": "stream-2", "config": "invalid-json"},
+        ]
+
+        streams = await registry.list_streams()
+
+        assert streams == [
+            {"id": "stream-1", "config": {"limit": 10}},
+            {"id": "stream-2", "config": {}},
+        ]
+        redis_mock.smembers.assert_awaited_once_with("streams:all")
+        redis_mock.scan.assert_not_called()
+        pipeline = redis_mock.pipeline.return_value
+        assert [call.args[0] for call in pipeline.hgetall.call_args_list] == [
+            "stream:meta:stream-1",
+            "stream:meta:stream-2",
+        ]
+        pipeline.execute.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_list_streams_removes_stale_tracking_entries(
+        self, redis_mock, registry
+    ):
+        redis_mock.smembers.return_value = ["stream-1", "stale-stream"]
+        redis_mock.pipeline.return_value.execute.return_value = [
+            {"id": "stream-1", "config": "{}"},
+            {},
+        ]
+
+        streams = await registry.list_streams()
+
+        assert streams == [{"id": "stream-1", "config": {}}]
+        redis_mock.srem.assert_awaited_once_with("streams:all", "stale-stream")
 
 
 class TestStreamRegistryCheckpoint:
@@ -203,22 +248,39 @@ class TestStreamRegistryDelete:
         stream_data = {
             "id": "stream-1",
             "subreddit": "python",
+            "instance_id": "instance-1",
         }
         redis_mock.hgetall = AsyncMock(return_value=stream_data)
 
-        pipe_mock = MagicMock()
-        pipe_mock.execute = AsyncMock()
-        pipe_mock.delete = MagicMock(return_value=pipe_mock)
-        pipe_mock.srem = MagicMock(return_value=pipe_mock)
-        redis_mock.pipeline = MagicMock(return_value=pipe_mock)
+        redis_mock.eval = AsyncMock(return_value=1)
 
         registry = StreamRegistry(redis=redis_mock, session_maker=session_maker_mock)
 
-        await registry.delete_stream("stream-1")
+        deleted = await registry.delete_stream(
+            "stream-1",
+            expected_status="stopped",
+            expected_updated_at="2026-05-05T10:00:00Z",
+        )
 
-        # Should call pipeline delete for meta, checkpoint, and subreddit keys
-        assert pipe_mock.delete.call_count >= 2
-        pipe_mock.execute.assert_called_once()
+        assert deleted is True
+        redis_mock.srem.assert_awaited_once_with(
+            "streams:instance:instance-1", "stream-1"
+        )
+        redis_mock.eval.assert_awaited_once_with(
+            _DELETE_STREAM_IF_UNCHANGED_SCRIPT,
+            6,
+            "stream:meta:stream-1",
+            "stream:checkpoint:stream-1",
+            "stream:stop-request:stream-1",
+            "stream:subreddit:python",
+            "streams:all",
+            "stream:identity:python",
+            "stream-1",
+            "stopped",
+            "2026-05-05T10:00:00Z",
+            "0",
+        )
+        redis_mock.delete.assert_not_awaited()
 
 
 class TestStreamRegistryUpdateStatus:
@@ -237,9 +299,32 @@ class TestStreamRegistryUpdateStatus:
         call_args = redis_mock.hset.call_args
         assert call_args[1]["mapping"]["status"] == "running"
         assert call_args[1]["mapping"]["instance_id"] == "instance-1"
+        redis_mock.sadd.assert_awaited_once_with(
+            "streams:instance:instance-1", "stream-1"
+        )
 
         session_mock.execute.assert_called()
         session_mock.commit.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_only_updates_redis(self, redis_mock, session_maker_mock):
+        redis_mock.eval.return_value = 1
+        registry = StreamRegistry(redis=redis_mock, session_maker=session_maker_mock)
+
+        refreshed = await registry.heartbeat("stream-1", "instance-1")
+
+        assert refreshed is True
+        redis_mock.eval.assert_awaited_once()
+        heartbeat_call = redis_mock.eval.await_args
+        assert heartbeat_call.args[0] == _HEARTBEAT_IF_ACTIVE_SCRIPT
+        assert heartbeat_call.args[1:4] == (
+            2,
+            "stream:meta:stream-1",
+            "streams:instance:instance-1",
+        )
+        assert heartbeat_call.args[4] == "instance-1"
+        assert heartbeat_call.args[6] == "stream-1"
+        session_maker_mock.assert_not_called()
 
 
 class TestStreamRegistryStopRequest:

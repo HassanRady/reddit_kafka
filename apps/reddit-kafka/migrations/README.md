@@ -10,7 +10,8 @@ This directory contains SQL migration files for the PostgreSQL database schema.
 python -m src.migrations
 ```
 
-This will execute all `.sql` files in numerical order.
+This applies pending `.sql` files in numerical order. Applied filenames and
+checksums are recorded in the `schema_migrations` table.
 
 ### Option 2: Using psql (Manual)
 
@@ -37,8 +38,9 @@ docker-compose exec postgres psql -U local -d reddit_stream < migrations/001_ini
 
 ## Best Practices
 
-- Each migration file should be idempotent (safe to run multiple times)
-- Use `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS`
+- Never modify a migration after it has been applied; add a new migration instead
+- A migration runs once and is recorded atomically with its schema changes
+- SQL files may contain functions, triggers, and literals with semicolons
 - Include comments explaining the purpose of the migration
 - Keep migrations in chronological order (001, 002, 003, etc.)
 

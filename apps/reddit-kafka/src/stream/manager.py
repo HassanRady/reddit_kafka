@@ -18,16 +18,16 @@ class StreamManager:
     """Manage lifecycle of streams on the local instance.
 
     A StreamManager does not itself implement the streaming loop; instead it
-    accepts a `runner` callable (subreddit -> awaitable) which performs the
+    accepts a `runner` callable (subreddit, lock token -> awaitable) which performs the
     actual work for a stream. This keeps the manager testable and decoupled.
 
-    Example runner signature: async def runner(subreddit: str): ...
+    Example runner signature: async def runner(subreddit: str, lock_token: str): ...
     """
 
     def __init__(
         self,
         registry: StreamRegistry,
-        runner: Callable[[str], Awaitable[None]],
+        runner: Callable[[str, str | None], Awaitable[None]],
         instance_id: str,
         lock_manager: DistributedLockManager | None = None,
         stop_poll_interval: float = 1.0,
@@ -58,11 +58,12 @@ class StreamManager:
         stream_id = meta["id"]
 
         # Try to acquire distributed lock
+        lock_token: str | None = None
         if self.lock_manager:
-            lock_acquired = await self.lock_manager.acquire_lock(
+            lock_token = await self.lock_manager.acquire_lock(
                 subreddit, self.instance_id, ttl=60
             )
-            if not lock_acquired:
+            if lock_token is None:
                 # Cleanup registry entry since lock failed
                 await self.registry.delete_stream(stream_id)
                 raise RuntimeError(f"Cannot acquire lock for subreddit {subreddit}")
@@ -73,7 +74,7 @@ class StreamManager:
                 return meta
 
             task = asyncio.create_task(
-                self._run(stream_id, subreddit), name=f"stream-{stream_id}"
+                self._run(stream_id, subreddit, lock_token), name=f"stream-{stream_id}"
             )
             self._tasks[stream_id] = task
         await self.registry.update_status(
@@ -81,10 +82,13 @@ class StreamManager:
         )
         return meta
 
-    async def _run(self, stream_id: str, subreddit: str) -> None:
+    async def _run(
+        self, stream_id: str, subreddit: str, lock_token: str | None
+    ) -> None:
         """Wrapper around the runner, handling lifecycle updates and errors."""
         runner_task: asyncio.Task[None] = asyncio.create_task(
-            self._invoke_runner(subreddit), name=f"stream-runner-{stream_id}"
+            self._invoke_runner(subreddit, lock_token),
+            name=f"stream-runner-{stream_id}",
         )
         stop_watcher = asyncio.create_task(
             self._wait_for_stop_request(stream_id),
@@ -133,9 +137,9 @@ class StreamManager:
                 if stream_id in self._tasks:
                     del self._tasks[stream_id]
 
-    async def _invoke_runner(self, subreddit: str) -> None:
+    async def _invoke_runner(self, subreddit: str, lock_token: str | None) -> None:
         """Adapt the injected Awaitable factory to an asyncio coroutine."""
-        await self.runner(subreddit)
+        await self.runner(subreddit, lock_token)
 
     async def _wait_for_stop_request(self, stream_id: str) -> bool:
         """Poll shared state until another process requests termination."""

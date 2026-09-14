@@ -9,6 +9,8 @@ def redis_mock():
     """Mock Redis client for testing with async support."""
     mock = AsyncMock(spec=redis.Redis)
     mock.sadd = AsyncMock()
+    mock.smembers = AsyncMock(return_value=set())
+    mock.srem = AsyncMock()
     mock.set = AsyncMock()
     mock.get = AsyncMock()
     mock.hset = AsyncMock()
@@ -18,6 +20,7 @@ def redis_mock():
     mock.lpush = AsyncMock()
     mock.ltrim = AsyncMock()
     mock.expire = AsyncMock()
+    mock.eval = AsyncMock()
     mock.llen = AsyncMock()
     mock.lrange = AsyncMock()
     pipeline_mock = MagicMock()

@@ -3,12 +3,12 @@ import logging
 import os
 import uuid
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Annotated, Any
 
 import asyncpraw
 from asyncprawcore.exceptions import Forbidden, NotFound
 from confluent_kafka import Producer
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 
 from src.config import Settings
 from src.db import close_db, get_engine, get_session, init_db
@@ -80,8 +80,11 @@ async def _create_runner(
     kafka_topic = settings.kafka.raw_text_topic
     schema_settings = settings.schema_settings
 
-    async def runner(subreddit: str) -> None:
+    async def runner(subreddit: str, lock_token: str | None) -> None:
         """Runner that creates a StreamWorker and runs it."""
+        if lock_token is None:
+            raise RuntimeError(f"No lock token supplied for subreddit {subreddit}")
+
         stream_meta = await registry.get_stream_by_subreddit(subreddit)
         if not stream_meta:
             raise RuntimeError(f"Stream not found for subreddit {subreddit}")
@@ -98,6 +101,7 @@ async def _create_runner(
             stream_id=stream_id,
             kafka_topic=kafka_topic,
             schema_settings=schema_settings,
+            lock_token=lock_token,
         )
 
         try:
@@ -113,8 +117,38 @@ def _get_kafka_producer_from_settings(settings: Settings) -> Producer:
     return _get_kafka_producer(_build_kafka_producer_config(settings))
 
 
+async def _flush_kafka_producer(timeout: float = 5.0) -> None:
+    """Flush and release the shared producer after all workers have stopped."""
+    global _kafka_producer
+
+    kafka_producer = _kafka_producer
+    if kafka_producer is None:
+        return
+
+    try:
+        remaining_messages = await asyncio.to_thread(
+            kafka_producer.flush, timeout=timeout
+        )
+        if remaining_messages:
+            logger.warning(
+                "Kafka producer shutdown timed out with %d message(s) still queued",
+                remaining_messages,
+            )
+        else:
+            logger.info("✓ Kafka producer flushed")
+    except Exception:
+        logger.exception("Error flushing Kafka producer during shutdown")
+    finally:
+        # A new lifespan must create a new producer rather than reuse the
+        # instance whose delivery queue has already been drained.
+        if _kafka_producer is kafka_producer:
+            _kafka_producer = None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> Any:
+    global _reddit_client
+
     logger.info("Starting up...")
     settings = Settings()
 
@@ -157,6 +191,7 @@ async def lifespan(app: FastAPI) -> Any:
     app.state.flusher = CheckpointFlusher(
         redis,
         session_maker,  # type: ignore
+        instance_id=app.state.instance_id,
         flush_interval=settings.db_flush_interval,
     )
     await app.state.flusher.start()
@@ -186,6 +221,8 @@ async def lifespan(app: FastAPI) -> Any:
         await app.state.manager.stop_all()
         logger.info("✓ All streams stopped")
 
+    await _flush_kafka_producer()
+
     # Flush any remaining checkpoints to Postgres before stopping the flusher
     if hasattr(app.state, "flusher"):
         try:
@@ -194,6 +231,17 @@ async def lifespan(app: FastAPI) -> Any:
             logger.exception("Error during final checkpoint flush")
         await app.state.flusher.stop()
         logger.info("✓ Checkpoint flusher stopped")
+
+    reddit_client = getattr(app.state, "reddit_client", None)
+    if reddit_client is not None:
+        try:
+            await reddit_client.close()
+        finally:
+            # Do not return a closed client if the lifespan is started again in
+            # the same process (for example, during tests or a server reload).
+            if _reddit_client is reddit_client:
+                _reddit_client = None
+        logger.info("✓ Reddit client closed")
 
     await close_redis()
     logger.info("✓ Redis closed")
@@ -213,7 +261,9 @@ async def health() -> dict[str, str]:
 
 
 @app.post("/streams")
-async def create_stream(subreddit: str) -> dict[str, Any]:
+async def create_stream(
+    subreddit: Annotated[str, Query(min_length=1, max_length=255)],
+) -> dict[str, Any]:
     """Start streaming a subreddit."""
     # Pre-validate subreddit availability to avoid creating registry entries
     reddit = getattr(app.state, "reddit_client", None)
@@ -257,6 +307,9 @@ async def list_streams() -> list[dict[str, Any]]:
 async def stop_stream(stream_id: str) -> dict[str, Any]:
     """Stop a stream."""
     try:
+        meta = await app.state.registry.get_stream(stream_id)
+        if meta.get("status") in {"stopped", "error", "inactive"}:
+            return {"stream_id": stream_id, "status": str(meta["status"])}
         await app.state.manager.stop_stream(stream_id)
     except StreamNotFoundError:
         raise HTTPException(status_code=404, detail="Stream not found") from None
