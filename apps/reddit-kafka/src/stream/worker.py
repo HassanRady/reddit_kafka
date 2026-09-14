@@ -261,7 +261,7 @@ class StreamWorker:
             self.comments_since_checkpoint += 1
             if self.comments_since_checkpoint >= self.checkpoint_interval:
                 await self._flush_delivery_batch()
-                await self._save_checkpoint_for_comment(comment)
+                await self._save_checkpoint_for_comment_id(str(comment.id))
                 self.comments_since_checkpoint = 0
         except asyncio.CancelledError:
             raise
@@ -325,25 +325,24 @@ class StreamWorker:
 
         raise error
 
-    async def _save_checkpoint_for_comment(self, comment: Any) -> None:
+    async def _save_checkpoint_for_comment_id(self, comment_id: str) -> None:
         """Save checkpoint after processing a comment."""
         try:
             await self.registry.set_checkpoint(
                 self.stream_id,
-                last_comment_id=comment.id,
+                last_comment_id=comment_id,
                 last_processed_at=datetime.now(UTC).replace(tzinfo=None).isoformat(),
             )
-            logger.debug(f"Checkpoint saved: {comment.id}")
+            logger.debug(f"Checkpoint saved: {comment_id}")
         except Exception as e:
             logger.error(f"Error saving checkpoint: {e}")
 
     async def _save_checkpoint(self) -> None:
         """Save current checkpoint (called on shutdown)."""
         checkpoint = await self.registry.get_checkpoint(self.stream_id)
-        if checkpoint.get("last_comment_id"):
-            await self._save_checkpoint_for_comment(
-                type("", (), {"id": checkpoint["last_comment_id"]})()
-            )
+        last_comment_id = checkpoint.get("last_comment_id")
+        if last_comment_id:
+            await self._save_checkpoint_for_comment_id(last_comment_id)
 
     async def _lock_refresh_loop(self) -> None:
         """Refresh the lock, failing closed if ownership cannot be verified."""

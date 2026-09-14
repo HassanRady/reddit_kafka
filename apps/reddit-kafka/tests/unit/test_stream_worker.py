@@ -81,13 +81,13 @@ async def test_checkpoint_flush_does_not_block_event_loop(
     worker.checkpoint_interval = 100
     worker.comments_since_checkpoint = 99
     worker._delivery_errors = []
-    worker._save_checkpoint_for_comment = AsyncMock()
+    worker._save_checkpoint_for_comment_id = AsyncMock()
     worker.error_handler = SimpleNamespace(record_error=AsyncMock())
     monkeypatch.setattr(worker_module.asyncio, "to_thread", to_thread)
 
     await worker._process_comment(comment, {})
 
-    worker._save_checkpoint_for_comment.assert_awaited_once_with(comment)
+    worker._save_checkpoint_for_comment_id.assert_awaited_once_with("comment-1")
     to_thread.assert_awaited_once_with(kafka_producer.flush)
     kafka_producer.flush.assert_called_once_with()
     kafka_producer.produce.assert_called_once_with(
@@ -128,15 +128,29 @@ async def test_delivery_failure_does_not_advance_checkpoint(
     worker.checkpoint_interval = 100
     worker.comments_since_checkpoint = 99
     worker._delivery_errors = []
-    worker._save_checkpoint_for_comment = AsyncMock()
+    worker._save_checkpoint_for_comment_id = AsyncMock()
     worker.error_handler = SimpleNamespace(record_error=AsyncMock())
     monkeypatch.setattr(worker_module.asyncio, "to_thread", to_thread)
 
     with pytest.raises(KafkaDeliveryError, match="broker rejected message"):
         await worker._process_comment(comment, {})
 
-    worker._save_checkpoint_for_comment.assert_not_awaited()
+    worker._save_checkpoint_for_comment_id.assert_not_awaited()
     assert worker.comments_since_checkpoint == 100
+
+
+@pytest.mark.asyncio
+async def test_shutdown_checkpoint_uses_stored_comment_id() -> None:
+    worker = StreamWorker.__new__(StreamWorker)
+    worker.stream_id = "stream-1"
+    worker.registry = SimpleNamespace(
+        get_checkpoint=AsyncMock(return_value={"last_comment_id": "comment-42"})
+    )
+    worker._save_checkpoint_for_comment_id = AsyncMock()
+
+    await worker._save_checkpoint()
+
+    worker._save_checkpoint_for_comment_id.assert_awaited_once_with("comment-42")
 
 
 def make_lock_test_worker() -> StreamWorker:
