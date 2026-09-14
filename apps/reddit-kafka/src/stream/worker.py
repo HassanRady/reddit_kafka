@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-from contextlib import suppress
 from datetime import UTC, datetime
 from typing import Any
 
@@ -23,6 +22,10 @@ from src.stream.error_handler import ErrorHandler, RecoveryStrategy
 from src.stream.lock import DistributedLockManager
 
 logger = logging.getLogger(__name__)
+
+
+class LockLostError(RuntimeError):
+    """Raised when a worker can no longer prove ownership of its lock."""
 
 
 class StreamWorker:
@@ -93,6 +96,8 @@ class StreamWorker:
         self.checkpoint_interval = 100
         self.comments_since_checkpoint = 0
         self.lock_refresh_interval = 30
+        self.lock_ttl = 60
+        self.lock_refresh_timeout = 10
         # Event set when the worker should stop due to lock loss or other
         # cooperative shutdown triggers. Observed by the main loop and
         # long-running streaming loops so the worker can shutdown cleanly.
@@ -108,36 +113,44 @@ class StreamWorker:
         - Lock refresh
         """
         shutdown_event = False
+        stream_task: asyncio.Task[None] | None = None
+        lock_task: asyncio.Task[None] | None = None
 
         try:
             logger.info(f"StreamWorker starting for {self.subreddit}")
 
-            lock_task = asyncio.create_task(self._lock_refresh_loop())
+            stream_task = asyncio.create_task(
+                self._stream_loop(), name=f"stream-loop-{self.stream_id}"
+            )
+            lock_task = asyncio.create_task(
+                self._lock_refresh_loop(), name=f"lock-refresh-{self.stream_id}"
+            )
 
             try:
-                while True:  # Main loop (broken by CancelledError)
-                    # Cooperative stop requested (e.g. lock could not be refreshed)
-                    if self._stop_event.is_set():
-                        logger.info(
-                            "Stop event set for %s, exiting main loop", self.subreddit
-                        )
-                        shutdown_event = True
-                        break
-                    try:
-                        await self.circuit_breaker.call(
-                            self._fetch_and_process_comments
-                        )
-                    except asyncio.CancelledError:
-                        logger.info(f"StreamWorker cancelled for {self.subreddit}")
-                        shutdown_event = True
-                        break
-                    except Exception as e:
-                        await self._handle_error(e)
+                done, _ = await asyncio.wait(
+                    {stream_task, lock_task}, return_when=asyncio.FIRST_COMPLETED
+                )
 
-            finally:
-                lock_task.cancel()
-                with suppress(asyncio.CancelledError):
+                if lock_task in done:
+                    shutdown_event = True
+                    # The refresher only completes by raising on lock loss or an
+                    # inability to verify ownership. Propagate that failure so the
+                    # manager records the stream as errored.
                     await lock_task
+                    raise LockLostError(
+                        f"Lock refresher stopped unexpectedly for {self.subreddit}"
+                    )
+
+                await stream_task
+            except asyncio.CancelledError:
+                logger.info(f"StreamWorker cancelled for {self.subreddit}")
+                shutdown_event = True
+                raise
+            finally:
+                for task in (stream_task, lock_task):
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(stream_task, lock_task, return_exceptions=True)
 
         finally:
             if shutdown_event:
@@ -148,12 +161,28 @@ class StreamWorker:
                     logger.error(f"Error saving final checkpoint: {e}")
 
             try:
-                await self.lock_manager.release_lock(self.subreddit, self.lock_token)
-                logger.info(f"✓ Released lock for {self.subreddit}")
+                released = await self.lock_manager.release_lock(
+                    self.subreddit, self.lock_token
+                )
+                if released:
+                    logger.info(f"✓ Released lock for {self.subreddit}")
             except Exception as e:
                 logger.error(f"Error releasing lock: {e}")
 
             logger.info(f"StreamWorker finished for {self.subreddit}")
+
+    async def _stream_loop(self) -> None:
+        """Process the stream until cancelled or a fatal stream error occurs."""
+        while True:
+            if self._stop_event.is_set():
+                logger.info("Stop event set for %s, exiting main loop", self.subreddit)
+                return
+            try:
+                await self.circuit_breaker.call(self._fetch_and_process_comments)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                await self._handle_error(e)
 
     async def _fetch_and_process_comments(self) -> None:
         """Fetch comments from Reddit and produce to Kafka.
@@ -270,47 +299,47 @@ class StreamWorker:
             )
 
     async def _lock_refresh_loop(self) -> None:
-        """Periodically refresh the distributed lock."""
-        try:
-            while True:
-                await asyncio.sleep(self.lock_refresh_interval)
-                success = await self.lock_manager.refresh_lock(
-                    self.subreddit,
-                    self.lock_token,
-                    ttl=60,
+        """Refresh the lock, failing closed if ownership cannot be verified."""
+        while True:
+            await asyncio.sleep(self.lock_refresh_interval)
+            try:
+                success = await asyncio.wait_for(
+                    self.lock_manager.refresh_lock(
+                        self.subreddit,
+                        self.lock_token,
+                        ttl=self.lock_ttl,
+                    ),
+                    timeout=self.lock_refresh_timeout,
                 )
-                if not success:
-                    logger.error(f"Failed to refresh lock for {self.subreddit}")
-                    # Treat inability to refresh the lock as fatal: mark the
-                    # stream as errored and request cooperative shutdown so
-                    # the worker can save checkpoint and release resources.
-                    try:
-                        await self.registry.update_status(
-                            self.stream_id, "error", instance_id=self.instance_id
-                        )
-                    except Exception:
-                        logger.debug(
-                            "Failed to update registry on lock loss for %s",
-                            self.stream_id,
-                        )
-                    # Signal the main loop to stop and exit the refresher.
-                    self._stop_event.set()
-                    break
-                else:
-                    # Send a lightweight heartbeat to the registry so `updated_at`
-                    # reflects liveness while the worker is running. Failures
-                    # here should not break the loop, so swallow exceptions.
-                    try:
-                        await self.registry.update_status(
-                            self.stream_id, "active", instance_id=self.instance_id
-                        )
-                    except Exception:
-                        logger.debug(
-                            "Failed to update registry heartbeat for %s",
-                            self.stream_id,
-                        )
-        except asyncio.CancelledError:
-            pass
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._record_lock_loss()
+                raise LockLostError(
+                    f"Could not verify lock ownership for {self.subreddit}"
+                ) from exc
+
+            if not success:
+                self._record_lock_loss()
+                raise LockLostError(f"Lock ownership lost for {self.subreddit}")
+
+            # Send a lightweight heartbeat to the registry so `updated_at`
+            # reflects liveness while the worker is running. Failures here do
+            # not affect the Redis lease and therefore are non-fatal.
+            try:
+                await self.registry.update_status(
+                    self.stream_id, "active", instance_id=self.instance_id
+                )
+            except Exception:
+                logger.debug(
+                    "Failed to update registry heartbeat for %s",
+                    self.stream_id,
+                )
+
+    def _record_lock_loss(self) -> None:
+        """Record lock loss without delaying the watchdog failure."""
+        logger.error("Lost or could not verify lock for %s", self.subreddit)
+        self._stop_event.set()
 
     async def _handle_error(self, error: Exception) -> None:
         """Handle error and decide on recovery strategy."""

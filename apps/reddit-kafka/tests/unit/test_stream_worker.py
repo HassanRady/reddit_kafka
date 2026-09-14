@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from src.stream.circuit_breaker import CircuitBreaker
-from src.stream.worker import StreamWorker
+from src.stream.worker import LockLostError, StreamWorker
 
 
 @pytest.mark.asyncio
@@ -52,3 +52,87 @@ async def test_received_comment_resets_failures_while_stream_remains_open() -> N
         stream_task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await stream_task
+
+
+def make_lock_test_worker() -> StreamWorker:
+    worker = StreamWorker.__new__(StreamWorker)
+    worker.subreddit = "python"
+    worker.stream_id = "stream-1"
+    worker.instance_id = "process-1"
+    worker.lock_token = "process-1:current-lease"
+    worker.lock_refresh_interval = 0
+    worker.lock_ttl = 60
+    worker.lock_refresh_timeout = 1
+    worker._stop_event = asyncio.Event()
+    worker.registry = SimpleNamespace(
+        update_status=AsyncMock(),
+    )
+    worker._save_checkpoint = AsyncMock()
+    return worker
+
+
+@pytest.mark.asyncio
+async def test_lock_loss_cancels_idle_stream_and_propagates_error() -> None:
+    worker = make_lock_test_worker()
+    stream_started = asyncio.Event()
+    stream_cancelled = asyncio.Event()
+
+    async def idle_stream() -> None:
+        stream_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            stream_cancelled.set()
+            raise
+
+    async def lose_lock(*args, **kwargs) -> bool:
+        del args, kwargs
+        await stream_started.wait()
+        return False
+
+    worker._stream_loop = idle_stream
+    worker.lock_manager = SimpleNamespace(
+        refresh_lock=AsyncMock(side_effect=lose_lock),
+        release_lock=AsyncMock(return_value=False),
+    )
+
+    with pytest.raises(LockLostError, match="Lock ownership lost"):
+        await asyncio.wait_for(worker.run(), timeout=1)
+
+    assert stream_cancelled.is_set()
+    assert worker._stop_event.is_set()
+    worker.lock_manager.release_lock.assert_awaited_once_with(
+        "python", "process-1:current-lease"
+    )
+
+
+@pytest.mark.asyncio
+async def test_refresh_error_cancels_idle_stream_and_propagates_error() -> None:
+    worker = make_lock_test_worker()
+    stream_started = asyncio.Event()
+    stream_cancelled = asyncio.Event()
+
+    async def idle_stream() -> None:
+        stream_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            stream_cancelled.set()
+            raise
+
+    async def fail_refresh(*args, **kwargs) -> bool:
+        del args, kwargs
+        await stream_started.wait()
+        raise ConnectionError("Redis unavailable")
+
+    worker._stream_loop = idle_stream
+    worker.lock_manager = SimpleNamespace(
+        refresh_lock=AsyncMock(side_effect=fail_refresh),
+        release_lock=AsyncMock(return_value=False),
+    )
+
+    with pytest.raises(LockLostError, match="Could not verify lock ownership"):
+        await asyncio.wait_for(worker.run(), timeout=1)
+
+    assert stream_cancelled.is_set()
+    assert worker._stop_event.is_set()
