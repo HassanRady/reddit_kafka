@@ -112,7 +112,8 @@ The system uses optimistic worker placement and Redis locks to ensure only one i
 ## Migrations and schema
 
 - SQL migrations live in the `migrations/` directory (e.g. `migrations/001_initial_schema.sql`).
-- Migrations are run in lexicographic order by `src/migrations.py`.
+- Pending migrations are run in lexicographic order by `src/migrations.py` and
+  recorded with checksums in the `schema_migrations` table.
 - The Docker Compose file is configured with a one-shot `migrate` service so schema changes run once during startup.
 
 Production note: In real deployments prefer running migrations as a release step (CI/CD job) instead of a containerized one-shot run by the orchestration system.
