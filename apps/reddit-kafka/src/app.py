@@ -119,6 +119,8 @@ def _get_kafka_producer_from_settings(settings: Settings) -> Producer:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> Any:
+    global _reddit_client
+
     logger.info("Starting up...")
     settings = Settings()
 
@@ -198,6 +200,17 @@ async def lifespan(app: FastAPI) -> Any:
             logger.exception("Error during final checkpoint flush")
         await app.state.flusher.stop()
         logger.info("✓ Checkpoint flusher stopped")
+
+    reddit_client = getattr(app.state, "reddit_client", None)
+    if reddit_client is not None:
+        try:
+            await reddit_client.close()
+        finally:
+            # Do not return a closed client if the lifespan is started again in
+            # the same process (for example, during tests or a server reload).
+            if _reddit_client is reddit_client:
+                _reddit_client = None
+        logger.info("✓ Reddit client closed")
 
     await close_redis()
     logger.info("✓ Redis closed")

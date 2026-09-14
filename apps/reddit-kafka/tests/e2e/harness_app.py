@@ -54,6 +54,9 @@ class FakeReddit:
             raise ValueError("subreddit is required")
         return FakeSubreddit()
 
+    async def close(self) -> None:
+        return None
+
 
 class JsonTestSerializer:
     """Expose Kafka payloads to the E2E consumer without requiring AWS Glue."""
