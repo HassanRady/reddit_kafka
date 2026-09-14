@@ -140,15 +140,22 @@ uv run --frozen ruff check src
 ### End-to-end tests
 
 The E2E suite starts two independent application containers and real Kafka,
-Redis, and PostgreSQL services. It verifies migrations, API health, stream
-creation and duplicate rejection, Kafka delivery, Redis and PostgreSQL
-checkpoints, cross-instance termination, lock release, and that production stops
-after termination.
+Redis, and PostgreSQL services. It verifies migrations and schema contracts;
+API validation and health; atomic concurrent creation and duplicate rejection;
+Kafka delivery (including deleted authors); Redis and PostgreSQL checkpoints;
+recoverable, malformed-comment, and fatal-error handling; durable error records;
+cross-instance and idempotent termination; lock loss and stale-owner safety;
+dead-stream cleanup and stable restart identity; and that production stops after
+termination.
 
 Reddit and AWS Glue are replaced at their application boundaries with deterministic
 test doubles, so the suite needs no cloud credentials and does not depend on live
 Reddit availability. The production application, worker, Kafka producer, state
 stores, migrations, and multi-instance control flow remain unchanged.
+
+Broker/database outages and live Reddit/AWS compatibility remain deployment-level
+smoke or chaos-test concerns; deterministic worker delivery failures, migration
+checksum failures, and serializer behavior are covered by the unit suite.
 
 Run the suite from `apps/reddit-kafka`:
 

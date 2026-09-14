@@ -3,12 +3,12 @@ import logging
 import os
 import uuid
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Annotated, Any
 
 import asyncpraw
 from asyncprawcore.exceptions import Forbidden, NotFound
 from confluent_kafka import Producer
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 
 from src.config import Settings
 from src.db import close_db, get_engine, get_session, init_db
@@ -261,7 +261,9 @@ async def health() -> dict[str, str]:
 
 
 @app.post("/streams")
-async def create_stream(subreddit: str) -> dict[str, Any]:
+async def create_stream(
+    subreddit: Annotated[str, Query(min_length=1, max_length=255)],
+) -> dict[str, Any]:
     """Start streaming a subreddit."""
     # Pre-validate subreddit availability to avoid creating registry entries
     reddit = getattr(app.state, "reddit_client", None)
@@ -305,6 +307,9 @@ async def list_streams() -> list[dict[str, Any]]:
 async def stop_stream(stream_id: str) -> dict[str, Any]:
     """Stop a stream."""
     try:
+        meta = await app.state.registry.get_stream(stream_id)
+        if meta.get("status") in {"stopped", "error", "inactive"}:
+            return {"stream_id": stream_id, "status": str(meta["status"])}
         await app.state.manager.stop_stream(stream_id)
     except StreamNotFoundError:
         raise HTTPException(status_code=404, detail="Stream not found") from None

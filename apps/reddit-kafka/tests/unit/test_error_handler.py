@@ -1,5 +1,6 @@
 """Unit tests for ErrorHandler."""
 
+from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -47,6 +48,9 @@ class TestErrorHandlerRecordError:
         redis_mock.lpush.assert_called_once()
         session_mock.execute.assert_called()
         session_mock.commit.assert_called()
+        parameters = session_mock.execute.call_args.args[1]
+        assert isinstance(parameters["timestamp"], datetime)
+        assert parameters["timestamp"].tzinfo is None
 
     @pytest.mark.asyncio
     async def test_get_error_count(self, redis_mock):

@@ -89,7 +89,8 @@ class ErrorHandler:
         key = self._error_key(stream_id)
 
         # Use naive UTC timestamp format (compatible with Postgres NOW())
-        ts = datetime.now(UTC).replace(tzinfo=None).isoformat() + "Z"
+        timestamp = datetime.now(UTC).replace(tzinfo=None)
+        ts = timestamp.isoformat() + "Z"
         error_entry = {
             "id": str(uuid.uuid4()),
             "error_type": error_type,
@@ -143,7 +144,7 @@ class ErrorHandler:
                             "error_message": error_message,
                             "retry_count": 0,
                             "is_recoverable": 1 if is_recoverable else 0,
-                            "timestamp": ts,
+                            "timestamp": timestamp,
                         },
                     )
                     await session.commit()

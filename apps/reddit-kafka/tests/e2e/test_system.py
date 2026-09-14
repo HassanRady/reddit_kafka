@@ -108,15 +108,17 @@ async def required_database_row(query: str, *args: Any) -> asyncpg.Record:
     return row
 
 
-def kafka_record(consumer: Consumer) -> dict[str, Any]:
+def kafka_record(consumer: Consumer, subreddit: str) -> dict[str, Any]:
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
         message = consumer.poll(1)
         if message is None:
             continue
         assert message.error() is None, str(message.error())
-        return json.loads(message.value().decode("utf-8"))
-    raise AssertionError("no Kafka record received")
+        record = json.loads(message.value().decode("utf-8"))
+        if record.get("subreddit") == subreddit:
+            return record
+    raise AssertionError(f"no Kafka record received for {subreddit}")
 
 
 def kafka_high_watermark(consumer: Consumer) -> int:
@@ -181,7 +183,7 @@ async def test_complete_stream_lifecycle_across_two_app_instances() -> None:
         assert active["instance_id"]
         assert redis_client.exists("stream:lock:e2e_python") == 1
 
-        record = kafka_record(consumer)
+        record = kafka_record(consumer, "e2e_python")
         assert record["subreddit"] == "e2e_python"
         assert record["author_id"] == "e2e-author"
         assert record["text"].startswith("deterministic E2E comment")
@@ -233,6 +235,12 @@ async def test_complete_stream_lifecycle_across_two_app_instances() -> None:
             )
         )
         assert database_stream["status"] == "stopped"
+
+        # Stopping a terminal stream is idempotent and reports its real state.
+        assert api_request(APP_A, "POST", f"/streams/{stream_id}/stop") == {
+            "stream_id": stream_id,
+            "status": "stopped",
+        }
 
         time.sleep(0.5)
         watermark_after_stop = kafka_high_watermark(consumer)
