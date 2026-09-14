@@ -56,6 +56,7 @@ class TestStreamRegistryCreateStream:
 
         assert redis_mock.set.await_count == 2
         redis_mock.hset.assert_called_once()
+        redis_mock.sadd.assert_any_await("streams:instance:instance-1", meta["id"])
 
         assert meta["subreddit"] == "python"
         assert meta["status"] == "starting"
@@ -206,6 +207,7 @@ class TestStreamRegistryDelete:
         stream_data = {
             "id": "stream-1",
             "subreddit": "python",
+            "instance_id": "instance-1",
         }
         redis_mock.hgetall = AsyncMock(return_value=stream_data)
 
@@ -220,6 +222,9 @@ class TestStreamRegistryDelete:
         )
 
         assert deleted is True
+        redis_mock.srem.assert_awaited_once_with(
+            "streams:instance:instance-1", "stream-1"
+        )
         redis_mock.eval.assert_awaited_once_with(
             _DELETE_STREAM_IF_UNCHANGED_SCRIPT,
             6,
@@ -253,6 +258,9 @@ class TestStreamRegistryUpdateStatus:
         call_args = redis_mock.hset.call_args
         assert call_args[1]["mapping"]["status"] == "running"
         assert call_args[1]["mapping"]["instance_id"] == "instance-1"
+        redis_mock.sadd.assert_awaited_once_with(
+            "streams:instance:instance-1", "stream-1"
+        )
 
         session_mock.execute.assert_called()
         session_mock.commit.assert_called()

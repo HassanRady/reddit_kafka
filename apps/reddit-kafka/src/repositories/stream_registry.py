@@ -153,6 +153,8 @@ class StreamRegistry:
 
         # Track stream ID in a set for efficient registry listing
         await redis.sadd("streams:all", stream_id)
+        if instance_id:
+            await redis.sadd(f"streams:instance:{instance_id}", stream_id)
 
         # Persist to Postgres streams table if session maker provided
         if self._session_maker is not None:
@@ -245,6 +247,8 @@ class StreamRegistry:
         if instance_id is not None:
             mapping["instance_id"] = instance_id
         await self._redis.hset(self._meta_key(stream_id), mapping=mapping)
+        if instance_id is not None:
+            await self._redis.sadd(f"streams:instance:{instance_id}", stream_id)
         # Also update Postgres if session maker available
         if self._session_maker is not None:
             try:
@@ -321,6 +325,9 @@ class StreamRegistry:
                 "1" if purge_checkpoint else "0",
             ),
         )
+        instance_id = meta.get("instance_id")
+        if deleted and instance_id:
+            await self._redis.srem(f"streams:instance:{instance_id}", stream_id)
         return bool(deleted)
 
     async def set_checkpoint(

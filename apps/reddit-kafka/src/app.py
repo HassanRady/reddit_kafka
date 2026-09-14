@@ -191,6 +191,7 @@ async def lifespan(app: FastAPI) -> Any:
     app.state.flusher = CheckpointFlusher(
         redis,
         session_maker,  # type: ignore
+        instance_id=app.state.instance_id,
         flush_interval=settings.db_flush_interval,
     )
     await app.state.flusher.start()
