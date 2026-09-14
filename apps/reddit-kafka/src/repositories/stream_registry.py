@@ -3,14 +3,36 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import text
 
 logger = logging.getLogger(__name__)
+
+_DELETE_STREAM_IF_UNCHANGED_SCRIPT = """
+if redis.call("exists", KEYS[1]) == 0 then
+    return 0
+end
+if ARGV[2] ~= "" and redis.call("hget", KEYS[1], "status") ~= ARGV[2] then
+    return 0
+end
+if ARGV[3] ~= "" and redis.call("hget", KEYS[1], "updated_at") ~= ARGV[3] then
+    return 0
+end
+if redis.call("get", KEYS[4]) == ARGV[1] then
+    redis.call("del", KEYS[4])
+end
+redis.call("set", KEYS[6], ARGV[1])
+redis.call("del", KEYS[1], KEYS[3])
+redis.call("srem", KEYS[5], ARGV[1])
+if ARGV[4] == "1" then
+    redis.call("del", KEYS[2], KEYS[6])
+end
+return 1
+"""
 
 _default_session_maker: Callable[[], Any] | None = None
 
@@ -44,6 +66,7 @@ class StreamRegistry:
       - stream:subreddit:{subreddit} -> stream_id (to detect duplicates)
       - stream:checkpoint:{stream_id} -> hash
         (last_comment_id, last_processed_at)
+      - stream:identity:{subreddit} -> stable stream_id used across restarts
     """
 
     def __init__(
@@ -72,6 +95,10 @@ class StreamRegistry:
         return f"stream:checkpoint:{stream_id}"
 
     @staticmethod
+    def _identity_key(subreddit: str) -> str:
+        return f"stream:identity:{subreddit}"
+
+    @staticmethod
     def _stop_request_key(stream_id: str) -> str:
         return f"stream:stop-request:{stream_id}"
 
@@ -89,11 +116,25 @@ class StreamRegistry:
         config = config or {}
         redis = self._redis
         sub_key = self._subreddit_key(subreddit)
+        identity_key = self._identity_key(subreddit)
 
-        stream_id = str(uuid.uuid4())
+        existing = await redis.get(sub_key)
+        if existing:
+            # Backfill stable identity for streams created before this key existed.
+            await redis.set(identity_key, existing, nx=True)
+            raise StreamExistsError(
+                f"stream already exists for subreddit={subreddit} (id={existing})"
+            )
+
+        candidate_id = str(uuid.uuid4())
+        identity_created = await redis.set(identity_key, candidate_id, nx=True)
+        stream_id = candidate_id if identity_created else await redis.get(identity_key)
+        if not stream_id:
+            raise RuntimeError(f"Unable to resolve stream identity for {subreddit}")
+
         claimed = await redis.set(sub_key, stream_id, nx=True)
         if not claimed:
-            # someone else already has a stream for this subreddit
+            # Another creator won after the initial existence check.
             existing = await redis.get(sub_key)
             raise StreamExistsError(
                 f"stream already exists for subreddit={subreddit} (id={existing})"
@@ -243,20 +284,44 @@ class StreamRegistry:
         """Return whether a shared stop request exists for the stream."""
         return bool(await self._redis.exists(self._stop_request_key(stream_id)))
 
-    async def delete_stream(self, stream_id: str) -> None:
+    async def delete_stream(
+        self,
+        stream_id: str,
+        *,
+        expected_status: str | None = None,
+        expected_updated_at: str | None = None,
+        purge_checkpoint: bool = False,
+    ) -> bool:
+        """Remove ephemeral stream state while retaining restart progress by default.
+
+        Expected status and update time act as an optimistic concurrency guard. If
+        the stream changed after a cleanup scan, nothing is removed.
+        """
         meta = await self._redis.hgetall(self._meta_key(stream_id))
         if not meta:
-            return
+            return False
         subreddit = meta.get("subreddit")
-        pipe = self._redis.pipeline()
-        pipe.delete(self._meta_key(stream_id))
-        pipe.delete(self._checkpoint_key(stream_id))
-        pipe.delete(self._stop_request_key(stream_id))
-        if subreddit:
-            pipe.delete(self._subreddit_key(subreddit))
-        # Remove from stream tracking set
-        pipe.srem("streams:all", stream_id)
-        await pipe.execute()
+        if not subreddit:
+            return False
+
+        deleted = await cast(
+            Awaitable[int],
+            self._redis.eval(
+                _DELETE_STREAM_IF_UNCHANGED_SCRIPT,
+                6,
+                self._meta_key(stream_id),
+                self._checkpoint_key(stream_id),
+                self._stop_request_key(stream_id),
+                self._subreddit_key(str(subreddit)),
+                "streams:all",
+                self._identity_key(str(subreddit)),
+                stream_id,
+                expected_status or "",
+                expected_updated_at or "",
+                "1" if purge_checkpoint else "0",
+            ),
+        )
+        return bool(deleted)
 
     async def set_checkpoint(
         self,

@@ -1,4 +1,4 @@
-"""Background task to clean up dead streams and locks."""
+"""Background task to retire terminal stream registry entries safely."""
 
 import asyncio
 import logging
@@ -13,12 +13,13 @@ logger = logging.getLogger(__name__)
 
 class DeadStreamCleanup:
     """
-    Periodically scans for dead streams and cleans up stale locks.
+    Periodically removes ephemeral registry state for terminal streams.
 
     Dead stream detection:
-    - Stream status is not in (active, paused, starting)
-    - Instance heartbeat is missing or expired
-    - Lock TTL has expired
+    - Stream status is stopped, error, or inactive
+
+    Checkpoints and stable stream identities remain available for restarts. Lock
+    leases are never mutated here; owners release them and abandoned leases expire.
     """
 
     def __init__(
@@ -88,22 +89,34 @@ class DeadStreamCleanup:
                         f"Cleaning up dead stream: {subreddit} (status={status})"
                     )
 
-                    # Delete stream entry
+                    # Delete only the exact dead snapshot observed by this scan.
+                    # A concurrent restart changes status/updated_at and makes the
+                    # conditional delete a no-op. Checkpoints and stable identity
+                    # are retained so a later start resumes the same logical stream.
                     try:
                         if stream_id:
-                            await self.registry.delete_stream(str(stream_id))
-                            dead_count += 1
+                            deleted = await self.registry.delete_stream(
+                                str(stream_id),
+                                expected_status=str(status) if status else None,
+                                expected_updated_at=(
+                                    str(stream.get("updated_at"))
+                                    if stream.get("updated_at")
+                                    else None
+                                ),
+                            )
+                            if deleted:
+                                dead_count += 1
+                            else:
+                                logger.info(
+                                    "Skipped cleanup for stream %s because it changed",
+                                    stream_id,
+                                )
                     except Exception as e:
                         logger.error(f"Error deleting stream {stream_id}: {e}")
 
-                    # Clean up associated lock if it still exists
-                    if subreddit:
-                        lock_key = f"stream:lock:{subreddit}"
-                        try:
-                            await self.redis.delete(lock_key)
-                            logger.debug(f"Deleted stale lock for {subreddit}")
-                        except Exception as e:
-                            logger.error(f"Error deleting lock: {e}")
+                    # Locks are leases: only the exact token owner may release one,
+                    # and abandoned locks expire through their TTL. Cleanup must not
+                    # delete a lock that may belong to a successor worker.
 
             if dead_count > 0:
                 logger.info(f"Cleaned up {dead_count} dead streams")
