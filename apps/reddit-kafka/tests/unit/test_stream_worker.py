@@ -93,6 +93,7 @@ async def test_checkpoint_flush_does_not_block_event_loop(
     kafka_producer.produce.assert_called_once_with(
         "raw-text",
         b"serialized-message",
+        key=b"python",
         on_delivery=worker._on_delivery,
     )
     assert worker.comments_since_checkpoint == 0

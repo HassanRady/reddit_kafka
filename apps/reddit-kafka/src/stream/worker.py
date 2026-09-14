@@ -248,6 +248,7 @@ class StreamWorker:
                 self.kafka_producer.produce(
                     self.kafka_topic,
                     serialized_message,
+                    key=self.subreddit.encode("utf-8"),
                     on_delivery=self._on_delivery,
                 )
                 self.kafka_producer.poll(0)
