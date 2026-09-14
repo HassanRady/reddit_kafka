@@ -230,26 +230,32 @@ class StreamRegistry:
 
     async def list_streams(self) -> list[dict[str, Any]]:
         redis = self._redis
-        cursor = 0
+        stream_ids = await cast(Awaitable[set[str]], redis.smembers("streams:all"))
+        if not stream_ids:
+            return []
+
+        pipe = redis.pipeline()
+        for stream_id in stream_ids:
+            pipe.hgetall(self._meta_key(str(stream_id)))
+
+        rows = await pipe.execute()
         results: list[dict[str, Any]] = []
-        pattern = "stream:meta:*"
-        while True:
-            cursor, keys = await redis.scan(cursor=cursor, match=pattern, count=100)
-            if keys:
-                pipe = redis.pipeline()
-                for k in keys:
-                    pipe.hgetall(k)
-                rows = await pipe.execute()
-                for data in rows:
-                    if data:
-                        if data.get("config"):
-                            try:
-                                data["config"] = json.loads(data["config"])
-                            except Exception:
-                                data["config"] = {}
-                        results.append(data)
-            if cursor == 0:
-                break
+        stale_stream_ids: list[str] = []
+        for stream_id, data in zip(stream_ids, rows, strict=True):
+            if not data:
+                stale_stream_ids.append(str(stream_id))
+                continue
+
+            if data.get("config"):
+                try:
+                    data["config"] = json.loads(data["config"])
+                except Exception:
+                    data["config"] = {}
+            results.append(data)
+
+        if stale_stream_ids:
+            await cast(Awaitable[int], redis.srem("streams:all", *stale_stream_ids))
+
         return results
 
     async def update_status(

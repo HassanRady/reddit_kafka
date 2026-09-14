@@ -147,6 +147,46 @@ class TestStreamRegistryGetStream:
             await registry.get_stream("nonexistent")
 
 
+class TestStreamRegistryListStreams:
+    @pytest.mark.asyncio
+    async def test_list_streams_uses_tracking_set(self, redis_mock, registry):
+        redis_mock.smembers.return_value = ["stream-1", "stream-2"]
+        redis_mock.pipeline.return_value.execute.return_value = [
+            {"id": "stream-1", "config": '{"limit": 10}'},
+            {"id": "stream-2", "config": "invalid-json"},
+        ]
+
+        streams = await registry.list_streams()
+
+        assert streams == [
+            {"id": "stream-1", "config": {"limit": 10}},
+            {"id": "stream-2", "config": {}},
+        ]
+        redis_mock.smembers.assert_awaited_once_with("streams:all")
+        redis_mock.scan.assert_not_called()
+        pipeline = redis_mock.pipeline.return_value
+        assert [call.args[0] for call in pipeline.hgetall.call_args_list] == [
+            "stream:meta:stream-1",
+            "stream:meta:stream-2",
+        ]
+        pipeline.execute.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_list_streams_removes_stale_tracking_entries(
+        self, redis_mock, registry
+    ):
+        redis_mock.smembers.return_value = ["stream-1", "stale-stream"]
+        redis_mock.pipeline.return_value.execute.return_value = [
+            {"id": "stream-1", "config": "{}"},
+            {},
+        ]
+
+        streams = await registry.list_streams()
+
+        assert streams == [{"id": "stream-1", "config": {}}]
+        redis_mock.srem.assert_awaited_once_with("streams:all", "stale-stream")
+
+
 class TestStreamRegistryCheckpoint:
     """Test checkpoint operations."""
 
