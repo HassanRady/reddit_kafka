@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import os
 import uuid
 from contextlib import asynccontextmanager
 from typing import Annotated, Any
@@ -8,10 +7,19 @@ from typing import Annotated, Any
 import asyncpraw
 from asyncprawcore.exceptions import Forbidden, NotFound
 from confluent_kafka import Producer
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request, Response
+from fastapi.responses import JSONResponse
+from sqlalchemy import text
 
 from src.config import Settings
 from src.db import close_db, get_engine, get_session, init_db
+from src.observability import (
+    METRICS,
+    configure_observability,
+    observe_http_request,
+    shutdown_observability,
+)
+from src.observability.metrics import CONTENT_TYPE_LATEST
 from src.redis_client import close_redis, get_redis
 from src.repositories.stream_registry import (
     StreamExistsError,
@@ -25,7 +33,6 @@ from src.tasks import CheckpointFlusher
 from src.tasks.dead_stream_cleanup import DeadStreamCleanup
 
 logger = logging.getLogger(__name__.split(".")[0])
-logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper())
 
 
 _reddit_client: asyncpraw.Reddit | None = None
@@ -149,14 +156,20 @@ async def _flush_kafka_producer(timeout: float = 5.0) -> None:
 async def lifespan(app: FastAPI) -> Any:
     global _reddit_client
 
-    logger.info("Starting up...")
     settings = Settings()
+    app.state.instance_id = str(uuid.uuid4())[:8]
+    configure_observability(settings.observability, app.state.instance_id)
+    logger.info(
+        "Starting application",
+        extra={"event": "application.starting"},
+    )
 
     await init_db(settings.postgres)
     logger.info("✓ Postgres initialized")
 
     redis = get_redis(settings.redis)
     _ = await redis.ping()  # type: ignore
+    app.state.redis = redis
     logger.info("✓ Redis connected")
 
     # Provide DB session maker to registry and other components so they can persist
@@ -164,8 +177,6 @@ async def lifespan(app: FastAPI) -> Any:
 
     app.state.registry = StreamRegistry(redis, session_maker=session_maker)
     app.state.lock_manager = DistributedLockManager(redis)
-    app.state.instance_id = str(uuid.uuid4())[:8]
-
     # Reddit client singleton for validation and worker creation
     app.state.reddit_client = _get_reddit_client(settings)
 
@@ -249,15 +260,70 @@ async def lifespan(app: FastAPI) -> Any:
     await close_db()
     logger.info("✓ Postgres closed")
 
-    logger.info("Shutdown complete")
+    logger.info("Shutdown complete", extra={"event": "application.stopped"})
+    await shutdown_observability()
 
 
 app = FastAPI(lifespan=lifespan)
 
 
+@app.middleware("http")
+async def telemetry_middleware(request: Request, call_next: Any) -> Response:
+    return await observe_http_request(request, call_next)
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/ready")
+async def readiness() -> JSONResponse:
+    """Check dependencies needed to accept stream-control traffic."""
+    checks: dict[str, bool] = {
+        "postgres": False,
+        "redis": False,
+        "kafka": False,
+        "reddit": getattr(app.state, "reddit_client", None) is not None,
+    }
+
+    try:
+        redis = getattr(app.state, "redis", None)
+        checks["redis"] = bool(redis is not None and await redis.ping())
+    except Exception:
+        logger.exception("Redis readiness check failed")
+
+    try:
+        async with get_session() as session:
+            await session.execute(text("SELECT 1"))
+        checks["postgres"] = True
+    except Exception:
+        logger.exception("PostgreSQL readiness check failed")
+
+    try:
+        producer = _kafka_producer
+        if producer is not None:
+            metadata = await asyncio.to_thread(producer.list_topics, timeout=2)
+            checks["kafka"] = metadata is not None
+    except Exception:
+        logger.exception("Kafka readiness check failed")
+
+    for dependency, is_ready in checks.items():
+        METRICS.dependency_ready.labels(dependency=dependency).set(1 if is_ready else 0)
+
+    is_ready = all(checks.values())
+    return JSONResponse(
+        status_code=200 if is_ready else 503,
+        content={
+            "status": "ready" if is_ready else "not_ready",
+            "checks": checks,
+        },
+    )
+
+
+@app.get("/metrics", include_in_schema=False)
+async def metrics() -> Response:
+    return Response(content=METRICS.render(), media_type=CONTENT_TYPE_LATEST)
 
 
 @app.post("/streams")
