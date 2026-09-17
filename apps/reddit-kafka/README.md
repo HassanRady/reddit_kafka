@@ -8,14 +8,18 @@ This README explains the architecture, design decisions, how to run the system (
 
 ## Architecture (high level)
 
-- FastAPI-based control plane that exposes a small HTTP API to start/stop/pause/resume subreddit streams.
+- FastAPI-based control plane that exposes a small HTTP API to start, stop, and
+  inspect subreddit streams.
 - Redis: hot-path state (checkpoints, locks) for very low-latency updates and distributed coordination.
 - PostgreSQL: durable registry and checkpoint persistence (write-behind flusher batches updates to reduce DB pressure).
 - Kafka: streaming backbone for high-throughput downstream processing (raw + derived topics).
 - Worker model: per-subreddit `StreamWorker` consumes Reddit via `asyncpraw`, produces to Kafka, and stores checkpoints in Redis.
 - `CheckpointFlusher`: background write-behind task that periodically flushes Redis checkpoints to Postgres.
 - `DistributedLockManager`: Redis-based locks to prevent duplicate streams across multiple app instances.
-- `ErrorHandler` + DLQ / `stream_errors` table for resilience and incident debugging.
+- `ErrorHandler` + durable `stream_errors` records for resilience and incident
+  debugging.
+- OpenTelemetry traces, trace-correlated JSON logs, bounded-cardinality Prometheus
+  metrics, and dependency readiness checks.
 
 Design trade-offs
 - Hot writes are kept in Redis (fast, in-memory) and committed to Postgres in batches to avoid DB hot-path write contention.
@@ -31,6 +35,10 @@ Design trade-offs
 - `src/repositories/stream_registry.py` — Registry backed by Redis (and optionally Postgres via a session maker).
 - `src/stream/worker.py` — Stream worker that consumes Reddit and writes messages and checkpoints.
 - `src/tasks/checkpoint_flusher.py` — Periodic batch upserter for checkpoints from Redis -> Postgres.
+- `src/observability/` — Telemetry bootstrap, HTTP tracing, structured logging, and
+  the Prometheus metric registry.
+- `observability/` — Collector, Prometheus alerts, Loki, Jaeger, and provisioned
+  Grafana resources.
 - `src/migrations.py` and `migrations/*.sql` — Simple migration runner that executes SQL files in order.
 - `docker-compose.yml` — Local stack with Postgres, Redis, Kafka (Confluent images), and the app + one-shot migrate job.
 
@@ -94,6 +102,15 @@ Notes
 ---
 
 ## API (control plane)
+
+- GET /health
+  - Process liveness without dependency checks.
+
+- GET /ready
+  - Readiness for Redis, PostgreSQL, Kafka, and Reddit initialization.
+
+- GET /metrics
+  - Prometheus metrics. Hidden from OpenAPI and blocked at the public AWS ALB.
 
 - POST /streams?subreddit=<name>
   - Start streaming the subreddit (creates registry entry, worker is started on the instance that acquired the lock).
@@ -176,8 +193,20 @@ Environment is configured with pydantic settings in `src/config.py` (or via `.en
 - REDIS_HOST / REDIS_PORT / REDIS_USER / REDIS_PASSWORD
 - KAFKA_BOOTSTRAP_SERVERS / KAFKA_RAW_TEXT_TOPIC
 - REDDIT_CLIENT_ID / REDDIT_CLIENT_SECRET / REDDIT_USER_AGENT
+- OTEL_EXPORTER_OTLP_ENDPOINT / OTEL_TRACE_SAMPLE_RATIO / TRACES_ENABLED
+- OTEL_LOGS_EXPORT_ENABLED / JSON_LOGS / LOG_LEVEL / DEPLOYMENT_ENVIRONMENT
 
 The provided `docker-compose.yml` includes reasonable local defaults. Use a `.env` file to override them for your environment.
+
+Start the complete local telemetry profile with:
+
+```bash
+OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317 \
+  docker compose --profile observability up --build
+```
+
+See [`observability/README.md`](observability/README.md) for dashboards, alerts,
+signal definitions, and production guidance.
 
 ---
 
@@ -186,7 +215,11 @@ The provided `docker-compose.yml` includes reasonable local defaults. Use a `.en
 - Migrations: run via CI/CD release step, use a database migration tool (e.g. Alembic) for more advanced schema versioning.
 - Lock safety: Redis-based locks are sufficient for the demo; consider RedLock or a database-backed leader election for stronger guarantees across geo-distributed instances.
 - Checkpoint durability: write-behind flusher reduces DB pressure. If you need stronger durability guarantees, flush on lifecycle events (stop/pause) immediately and consider increasing flush frequency.
-- Observability: add Prometheus metrics for worker throughput, flusher latencies, and Redis/DB errors. Add structured logs and Sentry/Datadog integration for production error monitoring.
+- Observability: Prometheus metrics, OpenTelemetry tracing, trace-correlated JSON
+  logs, readiness checks, alert rules, and a provisioned Grafana/Jaeger/Loki stack
+  are included. The dashboard distinguishes Reddit comments observed, processing
+  outcomes, Kafka-acknowledged messages, and delivered payload bytes. See
+  [`observability/README.md`](observability/README.md).
 
 ---
 
