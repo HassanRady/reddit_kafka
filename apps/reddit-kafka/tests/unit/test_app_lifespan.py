@@ -13,6 +13,7 @@ async def test_lifespan_closes_clients_and_flushes_kafka_producer(
     settings = MagicMock()
     settings.db_flush_interval = 30
     settings.dead_stream_cleanup_interval = 30
+    settings.observability = MagicMock()
 
     redis = AsyncMock()
     reddit_client = MagicMock()
@@ -51,6 +52,10 @@ async def test_lifespan_closes_clients_and_flushes_kafka_producer(
     )
     monkeypatch.setattr(app_module, "close_redis", AsyncMock())
     monkeypatch.setattr(app_module, "close_db", AsyncMock())
+    configure_observability = MagicMock()
+    shutdown_observability = AsyncMock()
+    monkeypatch.setattr(app_module, "configure_observability", configure_observability)
+    monkeypatch.setattr(app_module, "shutdown_observability", shutdown_observability)
     monkeypatch.setattr(app_module.asyncio, "to_thread", to_thread)
     monkeypatch.setattr(app_module, "_reddit_client", reddit_client)
     monkeypatch.setattr(app_module, "_kafka_producer", kafka_producer)
@@ -64,3 +69,8 @@ async def test_lifespan_closes_clients_and_flushes_kafka_producer(
     kafka_producer.flush.assert_called_once_with(timeout=5.0)
     assert app_module._reddit_client is None
     assert app_module._kafka_producer is None
+    configure_observability.assert_called_once_with(
+        settings.observability,
+        configure_observability.call_args.args[1],
+    )
+    shutdown_observability.assert_awaited_once_with()

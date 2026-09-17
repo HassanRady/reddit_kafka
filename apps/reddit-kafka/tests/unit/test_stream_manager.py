@@ -1,4 +1,5 @@
 import asyncio
+import contextvars
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -39,6 +40,40 @@ class SharedRegistry:
 
     async def is_stop_requested(self, stream_id: str) -> bool:
         return stream_id in self.stop_requests
+
+
+@pytest.mark.asyncio
+async def test_stream_task_does_not_inherit_request_context() -> None:
+    registry = SharedRegistry()
+    request_context: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+        "test_request_context",
+        default=None,
+    )
+    observed_context: list[str | None] = []
+    runner_started = asyncio.Event()
+
+    async def runner(subreddit: str, lock_token: str | None) -> None:
+        del subreddit, lock_token
+        observed_context.append(request_context.get())
+        runner_started.set()
+        await asyncio.Event().wait()
+
+    manager = StreamManager(  # type: ignore[arg-type]
+        registry,
+        runner,
+        "process-1",
+        stop_poll_interval=0.01,
+    )
+    token = request_context.set("request-123")
+    try:
+        meta = await manager.start_stream("python")
+    finally:
+        request_context.reset(token)
+
+    await asyncio.wait_for(runner_started.wait(), timeout=1)
+    await manager.stop_stream(meta["id"])
+
+    assert observed_context == [None]
 
 
 @pytest.mark.asyncio
