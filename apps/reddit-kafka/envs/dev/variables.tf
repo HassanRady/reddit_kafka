@@ -165,3 +165,18 @@ variable "log_level" {
   type    = string
   default = "INFO"
 }
+
+variable "otel_exporter_otlp_endpoint" {
+  type    = string
+  default = ""
+}
+
+variable "otel_trace_sample_ratio" {
+  type    = number
+  default = 0.1
+}
+
+variable "json_logs" {
+  type    = bool
+  default = true
+}

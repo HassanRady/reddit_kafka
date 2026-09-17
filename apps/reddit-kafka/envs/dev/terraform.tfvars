@@ -50,3 +50,6 @@ schema_version               = "1"
 use_localstack               = false
 db_flush_interval            = "90"
 dead_stream_cleanup_interval = "100"
+otel_exporter_otlp_endpoint  = ""
+otel_trace_sample_ratio      = 0.1
+json_logs                    = true
