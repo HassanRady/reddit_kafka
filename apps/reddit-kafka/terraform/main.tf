@@ -3,9 +3,9 @@ data "aws_caller_identity" "current" {}
 
 data "aws_iam_policy_document" "kms" {
   statement {
-    sid     = "AllowAccountRoot"
-    effect  = "Allow"
-    actions = ["kms:*"]
+    sid       = "AllowAccountRoot"
+    effect    = "Allow"
+    actions   = ["kms:*"]
     resources = ["*"]
     principals {
       type        = "AWS"
@@ -14,8 +14,8 @@ data "aws_iam_policy_document" "kms" {
   }
 
   statement {
-    sid     = "AllowSecretsManager"
-    effect  = "Allow"
+    sid    = "AllowSecretsManager"
+    effect = "Allow"
     actions = [
       "kms:Decrypt",
       "kms:Encrypt",
@@ -41,8 +41,8 @@ data "aws_iam_policy_document" "kms" {
 }
 
 resource "random_password" "rds_master" {
-  length  = 32
-  special = true
+  length           = 32
+  special          = true
   override_special = "!#$%&'()*+,-.:;<=>?[]^_`{|}~"
 }
 
@@ -310,7 +310,7 @@ resource "aws_elasticache_replication_group" "redis" {
     log_type         = "slow-log"
     log_format       = "text"
   }
-  tags                       = { Name = local.name }
+  tags = { Name = local.name }
 }
 resource "aws_msk_configuration" "main" {
   name              = "${local.name}-config"
@@ -603,7 +603,7 @@ resource "aws_lb_target_group" "app" {
     unhealthy_threshold = 5
     timeout             = 10
     interval            = 20
-    path                = "/health"
+    path                = "/ready"
     matcher             = "200"
   }
 }
@@ -645,6 +645,51 @@ resource "aws_lb_listener" "http_plain" {
     target_group_arn = aws_lb_target_group.app.arn
   }
 }
+
+# Metrics stay available on the task network for an internal scraper, but are not
+# exposed through the internet-facing load balancer.
+resource "aws_lb_listener_rule" "block_public_metrics_https" {
+  count        = local.enable_https ? 1 : 0
+  listener_arn = aws_lb_listener.https[0].arn
+  priority     = 10
+
+  condition {
+    path_pattern {
+      values = ["/metrics"]
+    }
+  }
+
+  action {
+    type = "fixed-response"
+    fixed_response {
+      content_type = "text/plain"
+      message_body = "Not found"
+      status_code  = "404"
+    }
+  }
+}
+
+resource "aws_lb_listener_rule" "block_public_metrics_http" {
+  count        = local.enable_https ? 0 : 1
+  listener_arn = aws_lb_listener.http_plain[0].arn
+  priority     = 10
+
+  condition {
+    path_pattern {
+      values = ["/metrics"]
+    }
+  }
+
+  action {
+    type = "fixed-response"
+    fixed_response {
+      content_type = "text/plain"
+      message_body = "Not found"
+      status_code  = "404"
+    }
+  }
+}
+
 resource "aws_ecs_cluster" "main" {
   name = local.name
   tags = { Name = local.name }
@@ -705,7 +750,13 @@ resource "aws_ecs_task_definition" "app" {
       { name = "USE_LOCALSTACK", value = tostring(var.use_localstack) },
       { name = "DB_FLUSH_INTERVAL", value = tostring(var.db_flush_interval) },
       { name = "DEAD_STREAM_CLEANUP_INTERVAL", value = tostring(var.dead_stream_cleanup_interval) },
-      { name = "LOG_LEVEL", value = var.log_level }
+      { name = "LOG_LEVEL", value = var.log_level },
+      { name = "OTEL_SERVICE_NAME", value = var.project_name },
+      { name = "SERVICE_VERSION", value = var.app_image_tag },
+      { name = "DEPLOYMENT_ENVIRONMENT", value = var.environment },
+      { name = "OTEL_EXPORTER_OTLP_ENDPOINT", value = var.otel_exporter_otlp_endpoint },
+      { name = "OTEL_TRACE_SAMPLE_RATIO", value = tostring(var.otel_trace_sample_ratio) },
+      { name = "JSON_LOGS", value = tostring(var.json_logs) }
 
 
     ]

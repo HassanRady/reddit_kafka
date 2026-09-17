@@ -164,3 +164,25 @@ variable "log_level" {
   type    = string
   default = "INFO"
 }
+
+variable "otel_exporter_otlp_endpoint" {
+  type        = string
+  default     = ""
+  description = "OTLP/gRPC collector endpoint. Empty disables remote export."
+}
+
+variable "otel_trace_sample_ratio" {
+  type        = number
+  default     = 0.1
+  description = "Head sampling ratio for application traces."
+  validation {
+    condition     = var.otel_trace_sample_ratio >= 0 && var.otel_trace_sample_ratio <= 1
+    error_message = "otel_trace_sample_ratio must be between 0 and 1."
+  }
+}
+
+variable "json_logs" {
+  type        = bool
+  default     = true
+  description = "Emit trace-correlated JSON logs to stdout."
+}

@@ -10,6 +10,9 @@ It is designed as a reusable upstream source for sentiment analysis, NLP pipelin
 search indexing, moderation tooling, or any system that needs a continuous feed of
 Reddit text.
 
+This root README is the canonical guide for the project. Component-specific details
+remain alongside their components, such as the migration and observability guides.
+
 ## What this project demonstrates
 
 - **Distributed coordination:** Redis leases ensure that only one application
@@ -26,6 +29,10 @@ Reddit text.
 - **Failure isolation:** retryable, rate-limited, fatal, malformed-message, Kafka
   delivery, and lock-loss failures follow different recovery paths. Operational
   errors are retained in Redis and persisted to PostgreSQL.
+- **Three-pillar observability:** bounded-cardinality Prometheus metrics,
+  trace-correlated JSON logs, OpenTelemetry spans for HTTP, Reddit, AWS Glue, Redis,
+  SQL, workers, and background tasks, plus W3C trace propagation through Kafka
+  headers.
 - **Production-oriented delivery:** the repository includes a non-root multi-stage
   container, a deterministic migration runner, a containerized development stack,
   a two-instance end-to-end harness, and Terraform for an AWS deployment.
@@ -45,6 +52,13 @@ flowchart LR
     Flusher -->|durable upsert| Postgres[(PostgreSQL)]
     Worker -->|durable errors| Postgres
     Glue[AWS Glue Schema Registry] -->|Avro contract| Worker
+    API -->|metrics| Prometheus[Prometheus]
+    API -->|OTLP traces + logs| Collector[OTel Collector]
+    Collector --> Jaeger
+    Collector --> Loki
+    Prometheus --> Grafana
+    Jaeger --> Grafana
+    Loki --> Grafana
 ```
 
 The service separates the **control plane** (HTTP requests and stream lifecycle)
@@ -87,6 +101,7 @@ by another instance.
 | Source and messaging | asyncpraw, Kafka, confluent-kafka |
 | State and persistence | Redis 7, PostgreSQL 16, async SQLAlchemy, asyncpg |
 | Data contract | Pydantic, Avro, AWS Glue Schema Registry |
+| Observability | OpenTelemetry, Prometheus, Grafana, Jaeger, Loki |
 | Quality | pytest, pytest-asyncio, strict mypy, Ruff, pre-commit |
 | Runtime and infrastructure | Docker Compose, Terraform, AWS ECS, MSK, Aurora PostgreSQL, ElastiCache, ALB, ECR, KMS, Secrets Manager, CloudWatch |
 
@@ -95,6 +110,8 @@ by another instance.
 | Method | Endpoint | Purpose |
 | --- | --- | --- |
 | `GET` | `/health` | Liveness check |
+| `GET` | `/ready` | Redis, PostgreSQL, Kafka, and Reddit readiness |
+| `GET` | `/metrics` | Prometheus exposition endpoint |
 | `POST` | `/streams?subreddit={name}` | Validate a subreddit and start its stream |
 | `GET` | `/streams` | List current stream metadata and status |
 | `POST` | `/streams/{stream_id}/stop` | Request an idempotent local or cross-instance stop |
@@ -181,6 +198,33 @@ docker compose up --build
 Compose creates a three-partition Kafka topic, starts PostgreSQL and Redis, runs SQL
 migrations once, and exposes the API on port `8000`.
 
+To run only the pending database migrations:
+
+```bash
+docker compose run --rm migrate
+```
+
+See the [migration guide](apps/reddit-kafka/migrations/README.md) for migration
+authoring, checksum validation, and recovery procedures.
+
+### Start the observability profile
+
+```bash
+OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317 \
+  docker compose --profile observability up --build
+```
+
+This adds an OpenTelemetry Collector, Prometheus alert rules, Jaeger traces, Loki
+logs, and an auto-provisioned Grafana dashboard:
+
+- Grafana: <http://localhost:3000/d/reddit-kafka-overview> (`admin` / `admin`)
+- Prometheus: <http://localhost:9090>
+- Jaeger: <http://localhost:16686>
+
+See the [observability guide](apps/reddit-kafka/observability/README.md) for the
+signal catalog, initial SLOs, alert triage, privacy/cardinality decisions, and
+production guidance.
+
 ## Development and verification
 
 The project uses [`uv`](https://docs.astral.sh/uv/) and a committed lockfile for
@@ -201,7 +245,10 @@ uv run --frozen mypy src
 ./scripts/run-e2e.sh
 ```
 
-The current unit suite contains **63 passing test cases**. The E2E harness starts
+If an E2E failure needs inspection, run the suite with `E2E_KEEP_STACK=1` to leave
+its containers running after the test exits.
+
+The current unit suite contains **70 passing test cases**. The E2E harness starts
 real Kafka, Redis, PostgreSQL, and two independent application containers, then
 verifies:
 
@@ -230,6 +277,7 @@ chaos-test concerns; the automated E2E tests are intentionally deterministic.
     │   ├── serializers/           # Glue-backed Avro serializer
     │   └── tasks/                 # checkpoint flush and dead-state cleanup
     ├── migrations/                # checksummed SQL migrations
+    ├── observability/             # collector, alerts, dashboards, log/trace stores
     ├── schemas/                   # Avro contract and Glue Terraform
     ├── terraform/                 # reusable AWS infrastructure module
     ├── envs/dev/                  # development deployment composition
@@ -250,6 +298,7 @@ The Terraform configuration models a multi-AZ AWS deployment with:
   security-group network boundaries;
 - CloudWatch log groups and alarms for application, broker, cache, and database
   signals;
+- trace-correlated JSON logs and configurable OTLP export from each ECS task;
 - a separate Glue Schema Registry module for the backward-compatible Avro contract.
 
 The files are an infrastructure blueprint and are not evidence of a currently live

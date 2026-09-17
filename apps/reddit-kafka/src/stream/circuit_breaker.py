@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 
+from src.observability import METRICS
 from src.stream.error_handler import ErrorHandler
 
 logger = logging.getLogger(__name__)
@@ -76,6 +77,9 @@ class CircuitBreaker:
             if self.state == CircuitState.OPEN:
                 if self._should_attempt_reset():
                     self.state = CircuitState.HALF_OPEN
+                    METRICS.circuit_breaker_transitions.labels(
+                        state=CircuitState.HALF_OPEN.value
+                    ).inc()
                     self.success_count = 0
                     logger.info(
                         "Circuit breaker entering HALF_OPEN (backoff=%ss)",
@@ -127,6 +131,9 @@ class CircuitBreaker:
             self.success_count += 1
             if self.success_count >= self.success_threshold:
                 self.state = CircuitState.CLOSED
+                METRICS.circuit_breaker_transitions.labels(
+                    state=CircuitState.CLOSED.value
+                ).inc()
                 self.backoff_seconds = self.recovery_timeout
                 logger.info("✓ Circuit breaker CLOSED (recovered)")
         elif self.state == CircuitState.CLOSED:
@@ -153,6 +160,9 @@ class CircuitBreaker:
             )
             self.backoff_seconds = new_backoff
             self.state = CircuitState.OPEN
+            METRICS.circuit_breaker_transitions.labels(
+                state=CircuitState.OPEN.value
+            ).inc()
             logger.error(
                 f"Circuit breaker OPEN (exponential backoff: {self.backoff_seconds}s). "
                 f"Reason: {exc}"
@@ -167,6 +177,9 @@ class CircuitBreaker:
             )
             self.backoff_seconds = new_backoff
             self.state = CircuitState.OPEN
+            METRICS.circuit_breaker_transitions.labels(
+                state=CircuitState.OPEN.value
+            ).inc()
             logger.error(
                 f"Circuit breaker OPEN after {self.failure_count} failures. "
                 f"Initial backoff: {self.backoff_seconds}s. Reason: {exc}"
@@ -184,6 +197,9 @@ class CircuitBreaker:
     def reset(self) -> None:
         """Force reset the circuit breaker."""
         self.state = CircuitState.CLOSED
+        METRICS.circuit_breaker_transitions.labels(
+            state=CircuitState.CLOSED.value
+        ).inc()
         self.failure_count = 0
         self.success_count = 0
         self.backoff_seconds = self.recovery_timeout

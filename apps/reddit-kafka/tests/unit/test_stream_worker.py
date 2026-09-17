@@ -3,15 +3,19 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from prometheus_client import CollectorRegistry
 
 import src.stream.worker as worker_module
+from src.observability.metrics import ApplicationMetrics
 from src.stream.circuit_breaker import CircuitBreaker
 from src.stream.exceptions import KafkaDeliveryError
 from src.stream.worker import LockLostError, StreamWorker
 
 
 @pytest.mark.asyncio
-async def test_received_comment_resets_failures_while_stream_remains_open() -> None:
+async def test_received_comment_resets_failures_while_stream_remains_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     comment = SimpleNamespace(id="comment-1")
     keep_stream_open = asyncio.Event()
 
@@ -43,6 +47,12 @@ async def test_received_comment_resets_failures_while_stream_remains_open() -> N
     worker._process_comment = process_comment
     worker.circuit_breaker = CircuitBreaker(failure_threshold=5)
     worker.circuit_breaker.failure_count = 4
+    received_counter = MagicMock()
+    monkeypatch.setattr(
+        worker_module,
+        "METRICS",
+        SimpleNamespace(reddit_comments_received=received_counter),
+    )
 
     stream_task = asyncio.create_task(worker._fetch_and_process_comments())
     try:
@@ -50,6 +60,7 @@ async def test_received_comment_resets_failures_while_stream_remains_open() -> N
 
         assert not stream_task.done()
         assert worker.circuit_breaker.fail_count == 0
+        received_counter.inc.assert_called_once_with()
     finally:
         stream_task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -97,6 +108,22 @@ async def test_checkpoint_flush_does_not_block_event_loop(
         on_delivery=worker._on_delivery,
     )
     assert worker.comments_since_checkpoint == 0
+
+
+def test_delivery_callback_records_successful_payload_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metrics = ApplicationMetrics(CollectorRegistry())
+    monkeypatch.setattr(worker_module, "METRICS", metrics)
+    worker = StreamWorker.__new__(StreamWorker)
+    worker._delivery_errors = []
+    message = SimpleNamespace(value=lambda: b"serialized-message")
+
+    worker._on_delivery(None, message)
+
+    payload = metrics.render().decode()
+    assert 'reddit_kafka_kafka_deliveries_total{result="success"} 1.0' in payload
+    assert 'reddit_kafka_kafka_delivery_bytes_total{result="success"} 18.0' in payload
 
 
 @pytest.mark.asyncio

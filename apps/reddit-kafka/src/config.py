@@ -42,6 +42,23 @@ class SchemaSettings(BaseSettings):
     use_localstack: bool = Field(False, alias="USE_LOCALSTACK")
 
 
+class ObservabilitySettings(BaseSettings):
+    service_name: str = Field("reddit-kafka", alias="OTEL_SERVICE_NAME")
+    service_version: str = Field("0.1.0", alias="SERVICE_VERSION")
+    environment: str = Field("development", alias="DEPLOYMENT_ENVIRONMENT")
+    otlp_endpoint: str | None = Field(None, alias="OTEL_EXPORTER_OTLP_ENDPOINT")
+    traces_enabled: bool = Field(True, alias="TRACES_ENABLED")
+    logs_export_enabled: bool = Field(True, alias="OTEL_LOGS_EXPORT_ENABLED")
+    trace_sample_ratio: float = Field(
+        1.0,
+        alias="OTEL_TRACE_SAMPLE_RATIO",
+        ge=0.0,
+        le=1.0,
+    )
+    json_logs: bool = Field(True, alias="JSON_LOGS")
+    log_level: str = Field("INFO", alias="LOG_LEVEL")
+
+
 class Settings(BaseSettings):
     db_flush_interval: int = Field(10, alias="DB_FLUSH_INTERVAL")
     dead_stream_cleanup_interval: int = Field(120, alias="DEAD_STREAM_CLEANUP_INTERVAL")
@@ -51,3 +68,4 @@ class Settings(BaseSettings):
     redis: RedisSettings = Field(default_factory=RedisSettings)
     postgres: PostgresSettings = Field(default_factory=PostgresSettings)
     schema_settings: SchemaSettings = Field(default_factory=SchemaSettings)
+    observability: ObservabilitySettings = Field(default_factory=ObservabilitySettings)

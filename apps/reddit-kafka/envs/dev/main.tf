@@ -49,8 +49,11 @@ module "reddit_kafka" {
   kafka_sasl_username  = var.kafka_sasl_username
   kafka_sasl_password  = var.kafka_sasl_password
   # CloudWatch
-  log_retention_days    = var.log_retention_days
-  enable_kms_encryption = var.enable_kms_encryption
+  log_retention_days          = var.log_retention_days
+  enable_kms_encryption       = var.enable_kms_encryption
+  otel_exporter_otlp_endpoint = var.otel_exporter_otlp_endpoint
+  otel_trace_sample_ratio     = var.otel_trace_sample_ratio
+  json_logs                   = var.json_logs
 }
 # Output infrastructure endpoints
 output "alb_dns" {

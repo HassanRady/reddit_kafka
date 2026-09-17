@@ -1,0 +1,67 @@
+groups:
+  - name: reddit-kafka
+    rules:
+      - alert: RedditKafkaTargetDown
+        expr: up{job="reddit-kafka"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Reddit Kafka application is unavailable
+          description: Prometheus has failed to scrape the application for 1 minute.
+
+      - alert: RedditKafkaHighHTTPErrorRate
+        expr: |
+          (
+            sum(rate(reddit_kafka_http_requests_total{status_code=~"5.."}[5m]))
+            /
+            clamp_min(sum(rate(reddit_kafka_http_requests_total[5m])), 0.001)
+          ) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Control-plane 5xx error rate exceeds 5%
+          description: More than 5% of API requests have failed for 5 minutes.
+
+      - alert: RedditKafkaDeliveryFailures
+        expr: increase(reddit_kafka_kafka_deliveries_total{result="error"}[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Kafka deliveries are failing
+          description: At least one asynchronous Kafka delivery failed recently.
+
+      - alert: RedditKafkaCheckpointFlushFailures
+        expr: increase(reddit_kafka_checkpoint_flushes_total{result="error"}[10m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: Durable checkpoint flush failed
+          description: A Redis-to-PostgreSQL checkpoint flush failed.
+
+      - alert: RedditKafkaNoRecentDeliveries
+        expr: |
+          reddit_kafka_active_streams > 0
+          and
+          time() - reddit_kafka_last_delivery_timestamp_seconds > 300
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Active streams have no recent Kafka deliveries
+          description: Workers are active but no successful delivery was recorded.
+
+      - alert: RedditKafkaHighAPILatency
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (rate(reddit_kafka_http_request_duration_seconds_bucket[5m]))
+          ) > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: API p95 latency exceeds one second
+          description: Control-plane request latency has remained elevated.

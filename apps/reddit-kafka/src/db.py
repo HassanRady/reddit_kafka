@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from src.config import PostgresSettings
+from src.observability.telemetry import instrument_sqlalchemy
 
 _engine: AsyncEngine | None = None
 _async_session_maker: async_sessionmaker[AsyncSession] | None = None
@@ -33,6 +34,7 @@ async def init_db(settings: PostgresSettings) -> None:
         pool_size=10,
         max_overflow=20,
     )
+    instrument_sqlalchemy(_engine)
 
     _async_session_maker = async_sessionmaker(
         _engine,
