@@ -20,6 +20,7 @@ from asyncprawcore.exceptions import (
 )
 from sqlalchemy import text
 
+from src.observability import METRICS
 from src.stream.exceptions import KafkaDeliveryError
 
 _default_session_maker: Callable[[], Any] | None = None
@@ -98,6 +99,10 @@ class ErrorHandler:
             "is_recoverable": "1" if is_recoverable else "0",
             "timestamp": ts,
         }
+        METRICS.errors.labels(
+            error_type=error_type,
+            recoverable=str(is_recoverable).lower(),
+        ).inc()
 
         # Push to Redis list (keep last 100 errors)
         await self.redis.lpush(key, json.dumps(error_entry))  # type: ignore  # Add to front

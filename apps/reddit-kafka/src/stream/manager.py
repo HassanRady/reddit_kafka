@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from typing import Any
 
+from src.observability import METRICS, get_tracer
 from src.repositories.stream_registry import StreamNotFoundError, StreamRegistry
 from src.stream.lock import DistributedLockManager
 
@@ -52,9 +54,15 @@ class StreamManager:
         Raises RuntimeError if lock cannot be acquired.
         Returns the stream metadata dict from the registry.
         """
-        meta = await self.registry.create_stream(
-            subreddit, config=config, instance_id=self.instance_id
-        )
+        tracer = get_tracer("stream_manager")
+        with tracer.start_as_current_span(
+            "stream.start",
+            attributes={"stream.subreddit": subreddit},
+        ) as span:
+            meta = await self.registry.create_stream(
+                subreddit, config=config, instance_id=self.instance_id
+            )
+            span.set_attribute("stream.id", str(meta["id"]))
         stream_id = meta["id"]
 
         # Try to acquire distributed lock
@@ -66,6 +74,9 @@ class StreamManager:
             if lock_token is None:
                 # Cleanup registry entry since lock failed
                 await self.registry.delete_stream(stream_id)
+                METRICS.stream_lifecycle.labels(
+                    transition="start", result="lock_contended"
+                ).inc()
                 raise RuntimeError(f"Cannot acquire lock for subreddit {subreddit}")
 
         async with self._lock:
@@ -74,12 +85,18 @@ class StreamManager:
                 return meta
 
             task = asyncio.create_task(
-                self._run(stream_id, subreddit, lock_token), name=f"stream-{stream_id}"
+                self._run(stream_id, subreddit, lock_token),
+                name=f"stream-{stream_id}",
+                # Workers can run for days. Do not retain the request ID or ended
+                # server span from the API call that created them.
+                context=contextvars.Context(),
             )
             self._tasks[stream_id] = task
         await self.registry.update_status(
             stream_id, "active", instance_id=self.instance_id
         )
+        METRICS.active_streams.inc()
+        METRICS.stream_lifecycle.labels(transition="start", result="success").inc()
         return meta
 
     async def _run(
@@ -110,6 +127,7 @@ class StreamManager:
 
             # runner returned normally - mark stopped
             await self.registry.update_status(stream_id, "stopped")
+            METRICS.stream_lifecycle.labels(transition="stop", result="completed").inc()
             logger.info("runner finished for %s (id=%s)", subreddit, stream_id)
         except asyncio.CancelledError:
             # graceful cancellation
@@ -117,13 +135,18 @@ class StreamManager:
             with suppress(asyncio.CancelledError):
                 await runner_task
             await self.registry.update_status(stream_id, "stopped")
+            METRICS.stream_lifecycle.labels(transition="stop", result="cancelled").inc()
             logger.info("runner cancelled for %s (id=%s)", subreddit, stream_id)
             raise
         except StreamNotFoundError:
             await self.registry.update_status(stream_id, "error")
+            METRICS.stream_lifecycle.labels(
+                transition="run", result="stream_not_found"
+            ).inc()
             logger.exception("stream not found in registry during run: %s", stream_id)
         except Exception:
             await self.registry.update_status(stream_id, "error")
+            METRICS.stream_lifecycle.labels(transition="run", result="error").inc()
             logger.exception("stream %s crashed", stream_id)
         finally:
             if not runner_task.done():
@@ -133,9 +156,13 @@ class StreamManager:
             stop_watcher.cancel()
             with suppress(asyncio.CancelledError):
                 await stop_watcher
+            removed_local_task = False
             async with self._lock:
                 if stream_id in self._tasks:
                     del self._tasks[stream_id]
+                    removed_local_task = True
+            if removed_local_task:
+                METRICS.active_streams.dec()
 
     async def _invoke_runner(self, subreddit: str, lock_token: str | None) -> None:
         """Adapt the injected Awaitable factory to an asyncio coroutine."""
@@ -149,6 +176,13 @@ class StreamManager:
             await asyncio.sleep(self.stop_poll_interval)
 
     async def stop_stream(self, stream_id: str) -> None:
+        with get_tracer("stream_manager").start_as_current_span(
+            "stream.stop",
+            attributes={"stream.id": stream_id},
+        ):
+            await self._stop_stream(stream_id)
+
+    async def _stop_stream(self, stream_id: str) -> None:
         # Publish first so the owning process sees the request even if this
         # process is terminated before it can perform a local cancellation.
         await self.registry.request_stop(stream_id)

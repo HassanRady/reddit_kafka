@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import time
 from datetime import UTC, datetime
 from typing import Any
 
@@ -12,9 +13,12 @@ from asyncprawcore.exceptions import (
     RequestException,
     TooManyRequests,
 )
+from opentelemetry import context as otel_context
+from opentelemetry.trace import SpanKind, Status, StatusCode
 
 from src.config import SchemaSettings
 from src.models import RedditCommentMessage
+from src.observability import METRICS, get_tracer, kafka_trace_headers
 from src.repositories.stream_registry import StreamRegistry
 from src.serializers.avro_serializer import get_serializer
 from src.stream.circuit_breaker import CircuitBreaker
@@ -213,6 +217,8 @@ class StreamWorker:
                 if comment is None:
                     continue
 
+                METRICS.reddit_comments_received.inc()
+
                 # A yielded comment proves that the long-lived Reddit stream is
                 # healthy. Report progress now because this coroutine normally
                 # runs forever and CircuitBreaker.call() cannot wait for it to
@@ -229,59 +235,105 @@ class StreamWorker:
             checkpoint.get("last_comment_id")
             and comment.id == checkpoint["last_comment_id"]
         ):
+            METRICS.comments.labels(outcome="replayed").inc()
             logger.debug(f"Skipping already-processed comment {comment.id}")
             return
 
-        try:
-            message = RedditCommentMessage(
-                subreddit=self.subreddit,
-                author_id=comment.author.name if comment.author else "[deleted]",
-                text=comment.body,
-                timestamp=datetime.now(UTC).replace(tzinfo=None).isoformat() + "Z",
-            )
-
-            serialized_message = self.serializer.serialize(message)
-            if serialized_message is None:
-                raise ValueError("Serializer returned no payload")
-
+        started = time.perf_counter()
+        outcome = "error"
+        tracer = get_tracer("stream_worker")
+        # A stream task can outlive the request that created it. Each comment is
+        # therefore a new trace root, which is propagated to downstream consumers.
+        with tracer.start_as_current_span(
+            "reddit.comment.process",
+            context=otel_context.Context(),
+            kind=SpanKind.PRODUCER,
+            attributes={
+                "stream.id": self.stream_id,
+                "stream.subreddit": self.subreddit,
+                "messaging.system": "kafka",
+                "messaging.destination.name": self.kafka_topic,
+            },
+        ) as span:
             try:
-                self.kafka_producer.produce(
-                    self.kafka_topic,
-                    serialized_message,
-                    key=self.subreddit.encode("utf-8"),
-                    on_delivery=self._on_delivery,
+                message = RedditCommentMessage(
+                    subreddit=self.subreddit,
+                    author_id=comment.author.name if comment.author else "[deleted]",
+                    text=comment.body,
+                    timestamp=datetime.now(UTC).replace(tzinfo=None).isoformat() + "Z",
                 )
-                self.kafka_producer.poll(0)
-            except Exception as e:
-                raise KafkaDeliveryError(
-                    f"Kafka rejected comment {comment.id}: {e}"
-                ) from e
 
-            # Update checkpoint every N comments
-            self.comments_since_checkpoint += 1
-            if self.comments_since_checkpoint >= self.checkpoint_interval:
-                await self._flush_delivery_batch()
-                await self._save_checkpoint_for_comment_id(str(comment.id))
-                self.comments_since_checkpoint = 0
-        except asyncio.CancelledError:
-            raise
-        except KafkaDeliveryError:
-            raise
-        except Exception as e:
-            logger.exception(f"Error processing comment {comment.id}: {e}")
-            await self.error_handler.record_error(
-                self.stream_id,
-                "CommentProcessingError",
-                str(e),
-                is_recoverable=True,
-            )
+                serialized_message = self.serializer.serialize(message)
+                if serialized_message is None:
+                    raise ValueError("Serializer returned no payload")
+
+                try:
+                    produce_options: dict[str, Any] = {
+                        "key": self.subreddit.encode("utf-8"),
+                        "on_delivery": self._on_delivery,
+                    }
+                    trace_headers = kafka_trace_headers()
+                    if trace_headers:
+                        produce_options["headers"] = trace_headers
+                    self.kafka_producer.produce(
+                        self.kafka_topic,
+                        serialized_message,
+                        **produce_options,
+                    )
+                    self.kafka_producer.poll(0)
+                except Exception as e:
+                    raise KafkaDeliveryError(
+                        f"Kafka rejected comment {comment.id}: {e}"
+                    ) from e
+
+                self.comments_since_checkpoint += 1
+                if self.comments_since_checkpoint >= self.checkpoint_interval:
+                    await self._flush_delivery_batch()
+                    await self._save_checkpoint_for_comment_id(str(comment.id))
+                    self.comments_since_checkpoint = 0
+                outcome = "queued"
+                METRICS.comments.labels(outcome=outcome).inc()
+            except asyncio.CancelledError:
+                outcome = "cancelled"
+                span.set_status(Status(StatusCode.ERROR, "processing cancelled"))
+                raise
+            except KafkaDeliveryError as error:
+                outcome = "delivery_error"
+                METRICS.comments.labels(outcome=outcome).inc()
+                span.record_exception(error)
+                span.set_status(Status(StatusCode.ERROR))
+                raise
+            except Exception as error:
+                outcome = "invalid"
+                METRICS.comments.labels(outcome=outcome).inc()
+                span.record_exception(error)
+                span.set_status(Status(StatusCode.ERROR))
+                logger.exception(f"Error processing comment {comment.id}: {error}")
+                await self.error_handler.record_error(
+                    self.stream_id,
+                    "CommentProcessingError",
+                    str(error),
+                    is_recoverable=True,
+                )
+            finally:
+                METRICS.comment_processing_duration.labels(outcome=outcome).observe(
+                    time.perf_counter() - started
+                )
 
     def _on_delivery(self, error: Any, message: Any) -> None:
         """Record asynchronous delivery failures reported by librdkafka."""
-        del message
+        payload = message.value() if message is not None else None
+        payload_size = (
+            len(payload) if isinstance(payload, (bytes, bytearray, memoryview)) else 0
+        )
         if error is None:
+            METRICS.kafka_deliveries.labels(result="success").inc()
+            METRICS.kafka_delivery_bytes.labels(result="success").inc(payload_size)
+            METRICS.last_delivery_timestamp.set_to_current_time()
             return
 
+        METRICS.kafka_deliveries.labels(result="error").inc()
+        METRICS.kafka_delivery_bytes.labels(result="error").inc(payload_size)
         error_message = str(error)
         self._delivery_errors.append(error_message)
         logger.error(
@@ -383,6 +435,7 @@ class StreamWorker:
     def _record_lock_loss(self) -> None:
         """Record lock loss without delaying the watchdog failure."""
         logger.error("Lost or could not verify lock for %s", self.subreddit)
+        METRICS.stream_lifecycle.labels(transition="lease", result="lost").inc()
         self._stop_event.set()
 
     async def _handle_error(self, error: Exception) -> None:

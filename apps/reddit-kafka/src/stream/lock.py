@@ -7,6 +7,8 @@ from typing import cast
 
 import redis.asyncio as redis
 
+from src.observability import METRICS
+
 logger = logging.getLogger(__name__)
 
 _REFRESH_IF_OWNER_SCRIPT = """
@@ -63,17 +65,25 @@ class DistributedLockManager:
         key = self._lock_key(subreddit)
         owner_token = f"{instance_id}:{uuid.uuid4()}"
 
-        acquired = await self.redis.set(
-            key,
-            owner_token,
-            nx=True,
-            ex=ttl,
-        )
+        try:
+            acquired = await self.redis.set(
+                key,
+                owner_token,
+                nx=True,
+                ex=ttl,
+            )
+        except Exception:
+            METRICS.lock_operations.labels(operation="acquire", result="error").inc()
+            raise
 
         if acquired:
+            METRICS.lock_operations.labels(operation="acquire", result="success").inc()
             logger.debug(f"✓ Acquired lock for {subreddit} (instance={instance_id})")
             return owner_token
         else:
+            METRICS.lock_operations.labels(
+                operation="acquire", result="contended"
+            ).inc()
             holder = await self.redis.get(key)
             logger.warning(
                 f"✗ Lock already held for {subreddit} by {holder or 'unknown'}"
@@ -97,19 +107,27 @@ class DistributedLockManager:
             True if refreshed successfully, False if lock token doesn't match
         """
         key = self._lock_key(subreddit)
-        success = await cast(
-            Awaitable[int],
-            self.redis.eval(
-                _REFRESH_IF_OWNER_SCRIPT,
-                1,
-                key,
-                owner_token,
-                ttl,
-            ),
-        )
+        try:
+            success = await cast(
+                Awaitable[int],
+                self.redis.eval(
+                    _REFRESH_IF_OWNER_SCRIPT,
+                    1,
+                    key,
+                    owner_token,
+                    ttl,
+                ),
+            )
+        except Exception:
+            METRICS.lock_operations.labels(operation="refresh", result="error").inc()
+            raise
         if success:
+            METRICS.lock_operations.labels(operation="refresh", result="success").inc()
             logger.debug(f"✓ Refreshed lock for {subreddit}")
         else:
+            METRICS.lock_operations.labels(
+                operation="refresh", result="not_owner"
+            ).inc()
             logger.warning(f"✗ Cannot refresh unowned or expired lock for {subreddit}")
         return bool(success)
 
@@ -124,18 +142,26 @@ class DistributedLockManager:
             True if released, False if not held by this instance
         """
         key = self._lock_key(subreddit)
-        deleted = await cast(
-            Awaitable[int],
-            self.redis.eval(
-                _DELETE_IF_OWNER_SCRIPT,
-                1,
-                key,
-                owner_token,
-            ),
-        )
+        try:
+            deleted = await cast(
+                Awaitable[int],
+                self.redis.eval(
+                    _DELETE_IF_OWNER_SCRIPT,
+                    1,
+                    key,
+                    owner_token,
+                ),
+            )
+        except Exception:
+            METRICS.lock_operations.labels(operation="release", result="error").inc()
+            raise
         if deleted:
+            METRICS.lock_operations.labels(operation="release", result="success").inc()
             logger.debug(f"✓ Released lock for {subreddit}")
         else:
+            METRICS.lock_operations.labels(
+                operation="release", result="not_owner"
+            ).inc()
             logger.warning(f"✗ Cannot release unowned or expired lock for {subreddit}")
         return bool(deleted)
 

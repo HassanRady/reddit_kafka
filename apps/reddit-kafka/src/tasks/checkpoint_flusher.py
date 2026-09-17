@@ -2,14 +2,18 @@
 
 import asyncio
 import logging
+import time
 import uuid
 from collections.abc import Awaitable
 from datetime import datetime
 from typing import Any, cast
 
 import redis.asyncio as redis
+from opentelemetry.trace import Status, StatusCode
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from src.observability import METRICS, get_tracer
 
 logger = logging.getLogger(__name__)
 
@@ -94,59 +98,77 @@ class CheckpointFlusher:
             return None
 
     async def flush(self) -> None:
-        try:
-            stream_ids = await self.redis.smembers(self.stream_index_key)  # type: ignore
-            if not stream_ids:
-                return
-
-            checkpoints_to_upsert: list[dict[str, Any]] = []
-            stale_stream_ids: list[str] = []
-
-            # Fetch ownership metadata and checkpoints in one Redis round trip.
-            pipe = self.redis.pipeline()
-            for stream_id in stream_ids:
-                pipe.hgetall(f"stream:meta:{stream_id}")
-                pipe.hgetall(f"stream:checkpoint:{stream_id}")
-
-            results = await pipe.execute()
-
-            for index, stream_id in enumerate(stream_ids):
-                meta = results[index * 2]
-                checkpoint_data = results[index * 2 + 1]
-
-                # Ownership can move between instances. Discard stale index
-                # entries instead of allowing an old instance to flush them.
-                if not meta or meta.get("instance_id") != self.instance_id:
-                    stale_stream_ids.append(stream_id)
-                    continue
-
-                if not checkpoint_data:
-                    continue
-
-                parsed = self._parse_checkpoint_data(checkpoint_data)
-                if parsed is None:
-                    continue
-
-                checkpoints_to_upsert.append(
-                    {
-                        "id": stream_id,
-                        "stream_id": stream_id,
-                        "last_comment_id": parsed["last_comment_id"],
-                        "last_processed_at": parsed["last_processed_at"],
-                    }
+        started = time.perf_counter()
+        result = "success"
+        with get_tracer("checkpoint_flusher").start_as_current_span(
+            "checkpoint.flush",
+            attributes={"service.instance.id": self.instance_id},
+        ) as span:
+            try:
+                await self._flush()
+            except Exception as error:
+                result = "error"
+                span.record_exception(error)
+                span.set_status(Status(StatusCode.ERROR))
+                logger.error(f"CheckpointFlusher.flush error: {error}", exc_info=True)
+            finally:
+                METRICS.checkpoint_flushes.labels(result=result).inc()
+                METRICS.checkpoint_flush_duration.labels(result=result).observe(
+                    time.perf_counter() - started
                 )
 
-            if stale_stream_ids:
-                await cast(
-                    Awaitable[int],
-                    self.redis.srem(self.stream_index_key, *stale_stream_ids),
-                )
+    async def _flush(self) -> None:
+        """Collect owned checkpoints and persist them in one batch."""
+        stream_ids = await self.redis.smembers(self.stream_index_key)  # type: ignore
+        if not stream_ids:
+            return
 
-            if checkpoints_to_upsert:
-                await self._upsert_checkpoints(checkpoints_to_upsert)
+        checkpoints_to_upsert: list[dict[str, Any]] = []
+        stale_stream_ids: list[str] = []
 
-        except Exception as e:
-            logger.error(f"CheckpointFlusher.flush error: {e}", exc_info=True)
+        # Fetch ownership metadata and checkpoints in one Redis round trip.
+        pipe = self.redis.pipeline()
+        for stream_id in stream_ids:
+            pipe.hgetall(f"stream:meta:{stream_id}")
+            pipe.hgetall(f"stream:checkpoint:{stream_id}")
+
+        results = await pipe.execute()
+
+        for index, stream_id in enumerate(stream_ids):
+            meta = results[index * 2]
+            checkpoint_data = results[index * 2 + 1]
+
+            # Ownership can move between instances. Discard stale index
+            # entries instead of allowing an old instance to flush them.
+            if not meta or meta.get("instance_id") != self.instance_id:
+                stale_stream_ids.append(stream_id)
+                continue
+
+            if not checkpoint_data:
+                continue
+
+            parsed = self._parse_checkpoint_data(checkpoint_data)
+            if parsed is None:
+                continue
+
+            checkpoints_to_upsert.append(
+                {
+                    "id": stream_id,
+                    "stream_id": stream_id,
+                    "last_comment_id": parsed["last_comment_id"],
+                    "last_processed_at": parsed["last_processed_at"],
+                }
+            )
+
+        if stale_stream_ids:
+            await cast(
+                Awaitable[int],
+                self.redis.srem(self.stream_index_key, *stale_stream_ids),
+            )
+
+        if checkpoints_to_upsert:
+            METRICS.checkpoint_batch_size.observe(len(checkpoints_to_upsert))
+            await self._upsert_checkpoints(checkpoints_to_upsert)
 
     async def _upsert_checkpoints(self, checkpoints: list[dict[str, Any]]) -> None:
         """Batch upsert checkpoints to Postgres."""
