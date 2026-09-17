@@ -10,6 +10,9 @@ It is designed as a reusable upstream source for sentiment analysis, NLP pipelin
 search indexing, moderation tooling, or any system that needs a continuous feed of
 Reddit text.
 
+This root README is the canonical guide for the project. Component-specific details
+remain alongside their components, such as the migration and observability guides.
+
 ## What this project demonstrates
 
 - **Distributed coordination:** Redis leases ensure that only one application
@@ -195,6 +198,15 @@ docker compose up --build
 Compose creates a three-partition Kafka topic, starts PostgreSQL and Redis, runs SQL
 migrations once, and exposes the API on port `8000`.
 
+To run only the pending database migrations:
+
+```bash
+docker compose run --rm migrate
+```
+
+See the [migration guide](apps/reddit-kafka/migrations/README.md) for migration
+authoring, checksum validation, and recovery procedures.
+
 ### Start the observability profile
 
 ```bash
@@ -232,6 +244,9 @@ uv run --frozen mypy src
 # Full two-instance integration suite
 ./scripts/run-e2e.sh
 ```
+
+If an E2E failure needs inspection, run the suite with `E2E_KEEP_STACK=1` to leave
+its containers running after the test exits.
 
 The current unit suite contains **70 passing test cases**. The E2E harness starts
 real Kafka, Redis, PostgreSQL, and two independent application containers, then
