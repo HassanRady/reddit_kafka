@@ -100,6 +100,10 @@ services:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
       KAFKA_BOOTSTRAP_SERVERS: broker:29092
+      DEPLOYMENT_ENVIRONMENT: local
+      JSON_LOGS: ${JSON_LOGS:-true}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      OTEL_TRACE_SAMPLE_RATIO: ${OTEL_TRACE_SAMPLE_RATIO:-1.0}
     ports:
       - "8000:8000"
     depends_on:
@@ -112,6 +116,78 @@ services:
       migrate:
         condition: service_completed_successfully
 
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.111.0
+    profiles: ["observability"]
+    command: ["--config=/etc/otelcol-contrib/config.yml"]
+    volumes:
+      - ./observability/otel-collector.yml:/etc/otelcol-contrib/config.yml:ro
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+    depends_on:
+      jaeger:
+        condition: service_started
+      loki:
+        condition: service_started
+
+  prometheus:
+    image: prom/prometheus:v2.55.0
+    profiles: ["observability"]
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.enable-lifecycle"
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      app:
+        condition: service_started
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    profiles: ["observability"]
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"
+
+  loki:
+    image: grafana/loki:3.2.1
+    profiles: ["observability"]
+    command: ["-config.file=/etc/loki/local-config.yml"]
+    volumes:
+      - ./observability/loki.yml:/etc/loki/local-config.yml:ro
+      - loki_data:/loki
+
+  grafana:
+    image: grafana/grafana:11.2.2
+    profiles: ["observability"]
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      prometheus:
+        condition: service_started
+      jaeger:
+        condition: service_started
+      loki:
+        condition: service_started
+
 volumes:
   postgres_data:
   kafka_data:
+  prometheus_data:
+  loki_data:
+  grafana_data:

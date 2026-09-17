@@ -1,0 +1,114 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "graphTooltip": 1,
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Active Streams",
+      "id": 1,
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
+      "targets": [{"expr": "sum(reddit_kafka_active_streams)", "refId": "A"}]
+    },
+    {
+      "type": "stat",
+      "title": "Reddit Comments Observed",
+      "id": 10,
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
+      "targets": [{"expr": "sum(reddit_kafka_reddit_comments_received_total) or vector(0)", "refId": "A"}]
+    },
+    {
+      "type": "stat",
+      "title": "Kafka Messages Delivered",
+      "id": 11,
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0},
+      "targets": [{"expr": "sum(reddit_kafka_kafka_deliveries_total{result=\"success\"}) or vector(0)", "refId": "A"}]
+    },
+    {
+      "type": "stat",
+      "title": "Kafka Data Delivered",
+      "id": 12,
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0},
+      "fieldConfig": {"defaults": {"unit": "bytes"}, "overrides": []},
+      "targets": [{"expr": "sum(reddit_kafka_kafka_delivery_bytes_total{result=\"success\"}) or vector(0)", "refId": "A"}]
+    },
+    {
+      "type": "stat",
+      "title": "Kafka Deliveries / sec",
+      "id": 2,
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 4},
+      "targets": [{"expr": "sum(rate(reddit_kafka_kafka_deliveries_total{result=\"success\"}[5m])) or vector(0)", "refId": "A"}]
+    },
+    {
+      "type": "stat",
+      "title": "Kafka Data / sec",
+      "id": 13,
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 4},
+      "fieldConfig": {"defaults": {"unit": "Bps"}, "overrides": []},
+      "targets": [{"expr": "sum(rate(reddit_kafka_kafka_delivery_bytes_total{result=\"success\"}[5m])) or vector(0)", "refId": "A"}]
+    },
+    {
+      "type": "stat",
+      "title": "HTTP 5xx Rate",
+      "id": 3,
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 4},
+      "targets": [{"expr": "sum(rate(reddit_kafka_http_requests_total{status_code=~\"5..\"}[5m]))", "refId": "A"}]
+    },
+    {
+      "type": "stat",
+      "title": "Checkpoint Failures (1h)",
+      "id": 4,
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 4},
+      "targets": [{"expr": "sum(increase(reddit_kafka_checkpoint_flushes_total{result=\"error\"}[1h]))", "refId": "A"}]
+    },
+    {
+      "type": "timeseries",
+      "title": "Comment Processing Outcomes",
+      "id": 5,
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "targets": [{"expr": "sum by (outcome) (rate(reddit_kafka_comments_total[5m]))", "legendFormat": "{{outcome}}", "refId": "A"}]
+    },
+    {
+      "type": "timeseries",
+      "title": "API Latency Percentiles",
+      "id": 6,
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum by (le) (rate(reddit_kafka_http_request_duration_seconds_bucket[5m])))", "legendFormat": "p50", "refId": "A"},
+        {"expr": "histogram_quantile(0.95, sum by (le) (rate(reddit_kafka_http_request_duration_seconds_bucket[5m])))", "legendFormat": "p95", "refId": "B"},
+        {"expr": "histogram_quantile(0.99, sum by (le) (rate(reddit_kafka_http_request_duration_seconds_bucket[5m])))", "legendFormat": "p99", "refId": "C"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Errors by Type",
+      "id": 7,
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+      "targets": [{"expr": "sum by (error_type, recoverable) (rate(reddit_kafka_errors_total[5m]))", "legendFormat": "{{error_type}} recoverable={{recoverable}}", "refId": "A"}]
+    },
+    {
+      "type": "timeseries",
+      "title": "Checkpoint Flush p95",
+      "id": 8,
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+      "targets": [{"expr": "histogram_quantile(0.95, sum by (le, result) (rate(reddit_kafka_checkpoint_flush_duration_seconds_bucket[5m])))", "legendFormat": "{{result}}", "refId": "A"}]
+    },
+    {
+      "type": "logs",
+      "title": "Trace-correlated Application Logs",
+      "id": 9,
+      "gridPos": {"h": 9, "w": 24, "x": 0, "y": 24},
+      "datasource": {"type": "loki", "uid": "loki"},
+      "targets": [{"expr": "{service_name=\"reddit-kafka\"}", "refId": "A"}]
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "tags": ["reddit", "kafka", "observability"],
+  "templating": {"list": []},
+  "time": {"from": "now-1h", "to": "now"},
+  "timezone": "browser",
+  "title": "Reddit Kafka — Production Overview",
+  "uid": "reddit-kafka-overview",
+  "version": 3
+}

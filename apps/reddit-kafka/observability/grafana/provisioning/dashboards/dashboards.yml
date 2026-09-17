@@ -1,0 +1,12 @@
+apiVersion: 1
+
+providers:
+  - name: Reddit Kafka
+    orgId: 1
+    folder: Streaming Platform
+    type: file
+    disableDeletion: true
+    editable: true
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards
