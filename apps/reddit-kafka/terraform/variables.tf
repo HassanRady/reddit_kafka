@@ -135,6 +135,12 @@ variable "schema_registry_name" {
   default = "reddit-kafka-schemas"
 }
 
+variable "use_aws_schema_registry" {
+  type        = bool
+  description = "Use AWS Glue Schema Registry instead of the checked-in local Avro schema."
+  default     = true
+}
+
 variable "schema_name" {
   type    = string
   default = "RedditComment"
@@ -143,11 +149,6 @@ variable "schema_name" {
 variable "schema_version" {
   type    = number
   default = 1
-}
-
-variable "use_localstack" {
-  type    = bool
-  default = false
 }
 
 variable "db_flush_interval" {

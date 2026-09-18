@@ -31,6 +31,7 @@ COPY --from=builder /opt/venv /opt/venv
 
 COPY ./src ./src
 COPY ./migrations ./migrations
+COPY ./schemas ./schemas
 
 RUN chown -R appuser:appgroup /app
 USER appuser

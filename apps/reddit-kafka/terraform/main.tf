@@ -489,9 +489,7 @@ resource "aws_iam_role_policy" "ecs_task_policy" {
       Action = [
         "logs:CreateLogStream",
         "logs:PutLogEvents",
-        "glue:GetSchema",
-        "glue:GetSchemaVersion",
-        "glue:GetSchemaByDefinition"
+        "glue:GetSchemaVersion"
       ]
       Resource = [
         "${aws_cloudwatch_log_group.ecs.arn}:*",
@@ -743,11 +741,11 @@ resource "aws_ecs_task_definition" "app" {
       { name = "KAFKA_SSL_CA_LOCATION", value = "/etc/ssl/certs/ca-certificates.crt" },
       { name = "KAFKA_RAW_TEXT_TOPIC", value = var.kafka_raw_text_topic },
 
+      { name = "USE_AWS_SCHEMA_REGISTRY", value = tostring(var.use_aws_schema_registry) },
       { name = "SCHEMA_REGISTRY_NAME", value = var.schema_registry_name },
       { name = "SCHEMA_NAME", value = var.schema_name },
       { name = "SCHEMA_VERSION", value = tostring(var.schema_version) },
       { name = "AWS_REGION", value = var.aws_region },
-      { name = "USE_LOCALSTACK", value = tostring(var.use_localstack) },
       { name = "DB_FLUSH_INTERVAL", value = tostring(var.db_flush_interval) },
       { name = "DEAD_STREAM_CLEANUP_INTERVAL", value = tostring(var.dead_stream_cleanup_interval) },
       { name = "STREAM_RECONCILE_INTERVAL", value = tostring(var.stream_reconcile_interval) },

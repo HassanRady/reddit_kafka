@@ -47,7 +47,6 @@ kafka_raw_text_topic = "raw-text"
 schema_registry_name         = "reddit-kafka-schemas"
 schema_name                  = "RedditComment"
 schema_version               = "1"
-use_localstack               = false
 db_flush_interval            = "90"
 dead_stream_cleanup_interval = "100"
 stream_reconcile_interval    = "10"

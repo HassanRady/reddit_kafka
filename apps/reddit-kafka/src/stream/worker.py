@@ -86,13 +86,13 @@ class StreamWorker:
             registry._redis, session_maker=getattr(registry, "_session_maker", None)
         )
 
-        self.serializer = get_serializer(
-            schema_settings=schema_settings, topic_name=self.kafka_topic
+        self.serializer = get_serializer(schema_settings=schema_settings)
+        serializer_backend = (
+            "AWS Glue"
+            if schema_settings.use_aws_schema_registry
+            else "local Avro schema"
         )
-        logger.info(
-            f"Initialized Avro serializer (AWS: {schema_settings.use_localstack}, "
-            f"Region: {schema_settings.aws_region})"
-        )
+        logger.info("Initialized Avro serializer using %s", serializer_backend)
 
         self.checkpoint_interval = 100
         self.comments_since_checkpoint = 0

@@ -146,11 +146,6 @@ variable "schema_version" {
   default = "1"
 }
 
-variable "use_localstack" {
-  type    = bool
-  default = false
-}
-
 variable "db_flush_interval" {
   type    = string
   default = "10"

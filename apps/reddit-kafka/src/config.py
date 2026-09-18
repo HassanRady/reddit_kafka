@@ -35,11 +35,17 @@ class PostgresSettings(BaseSettings):
 
 
 class SchemaSettings(BaseSettings):
-    registry_name: str = Field(alias="SCHEMA_REGISTRY_NAME")
-    schema_name: str = Field(alias="SCHEMA_NAME")
-    schema_version: int = Field(alias="SCHEMA_VERSION")
-    aws_region: str = Field(alias="AWS_REGION")
-    use_localstack: bool = Field(False, alias="USE_LOCALSTACK")
+    use_aws_schema_registry: bool = Field(
+        True,
+        alias="USE_AWS_SCHEMA_REGISTRY",
+    )
+    registry_name: str = Field(
+        "reddit-kafka-schemas",
+        alias="SCHEMA_REGISTRY_NAME",
+    )
+    schema_name: str = Field("RedditComment", alias="SCHEMA_NAME")
+    schema_version: int = Field(1, alias="SCHEMA_VERSION", gt=0)
+    aws_region: str = Field("us-east-1", alias="AWS_REGION")
 
 
 class ObservabilitySettings(BaseSettings):
