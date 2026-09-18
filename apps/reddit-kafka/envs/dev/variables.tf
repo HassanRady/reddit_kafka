@@ -161,6 +161,11 @@ variable "dead_stream_cleanup_interval" {
   default = "120"
 }
 
+variable "stream_reconcile_interval" {
+  type    = string
+  default = "10"
+}
+
 variable "log_level" {
   type    = string
   default = "INFO"

@@ -216,6 +216,10 @@ async def lifespan(app: FastAPI) -> Any:
     await app.state.cleanup.start()
     logger.info("✓ Dead stream cleanup started")
 
+    # Start adoption only after all supporting background services are ready.
+    await app.state.manager.start_reconciliation(settings.stream_reconcile_interval)
+    logger.info("✓ Stream reconciliation started")
+
     yield
 
     logger.info("Shutting down...")
@@ -230,7 +234,7 @@ async def lifespan(app: FastAPI) -> Any:
     # so we don't lose the final state.
     if hasattr(app.state, "manager"):
         await app.state.manager.stop_all()
-        logger.info("✓ All streams stopped")
+        logger.info("✓ All local streams drained")
 
     await _flush_kafka_producer()
 

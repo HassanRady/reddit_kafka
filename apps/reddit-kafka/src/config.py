@@ -62,6 +62,7 @@ class ObservabilitySettings(BaseSettings):
 class Settings(BaseSettings):
     db_flush_interval: int = Field(10, alias="DB_FLUSH_INTERVAL")
     dead_stream_cleanup_interval: int = Field(120, alias="DEAD_STREAM_CLEANUP_INTERVAL")
+    stream_reconcile_interval: int = Field(10, alias="STREAM_RECONCILE_INTERVAL", gt=0)
 
     reddit: RedditSettings = Field(default_factory=RedditSettings)
     kafka: KafkaSettings = Field(default_factory=KafkaSettings)

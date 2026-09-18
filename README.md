@@ -76,8 +76,12 @@ by another instance.
 5. Comments are validated, Avro-serialized, and queued for Kafka. At each 100-comment
    boundary, the producer is flushed before the checkpoint advances.
 6. Redis checkpoints are asynchronously persisted to PostgreSQL by a write-behind
-   flusher. Shutdown stops workers, flushes Kafka, persists remaining checkpoints,
-   and releases owned leases.
+   flusher. Shutdown drains local workers, flushes Kafka, persists remaining
+   checkpoints, and releases owned leases for takeover.
+7. Every healthy instance reconciles shared stream state. If an owner fails, its
+   60-second lease expires and exactly one replica adopts the stream from its saved
+   checkpoint. A graceful instance shutdown releases ownership without changing the
+   user's intent to keep the stream running.
 
 ## Engineering decisions
 
@@ -248,7 +252,7 @@ uv run --frozen mypy src
 If an E2E failure needs inspection, run the suite with `E2E_KEEP_STACK=1` to leave
 its containers running after the test exits.
 
-The current unit suite contains **70 passing test cases**. The E2E harness starts
+The current unit suite contains **81 passing test cases**. The E2E harness starts
 real Kafka, Redis, PostgreSQL, and two independent application containers, then
 verifies:
 
@@ -317,6 +321,9 @@ remote Terraform state prerequisites described in
 - The Redis lease is appropriate for a single-region service but is not a consensus
   protocol. A geo-distributed deployment with stricter ownership guarantees would
   need a stronger coordination design.
+- Instance failover is lease based. With the default 60-second lease and 10-second
+  reconciliation interval, an abruptly orphaned stream normally resumes within
+  roughly 70 seconds. Graceful handoff can occur on the next reconciliation sweep.
 - No throughput number is claimed: capacity depends on Reddit limits, Kafka
   configuration, partitioning, network conditions, and the number of active
   subreddits. The next performance step is a repeatable load test with published

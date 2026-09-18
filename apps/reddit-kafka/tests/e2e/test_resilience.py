@@ -344,7 +344,7 @@ async def test_transient_failure_recovers_and_fatal_failure_releases_lock() -> N
 
 
 @pytest.mark.asyncio
-async def test_lock_loss_fails_closed_without_deleting_successor_lease() -> None:
+async def test_lock_loss_fails_closed_then_stream_is_adopted() -> None:
     subreddit = "e2e_lock_loss"
     successor_token = "successor-instance:replacement-lease"
     client = redis.Redis(
@@ -357,21 +357,48 @@ async def test_lock_loss_fails_closed_without_deleting_successor_lease() -> None
     try:
         created = api_request(APP_A, "POST", f"/streams?subreddit={subreddit}")
         stream_id = created["id"]
-        eventually(lambda: require_stream_status(APP_B, stream_id, "active"))
+        original = eventually(lambda: require_stream_status(APP_B, stream_id, "active"))
+        original_instance = original["instance_id"]
 
         lock_key = f"stream:lock:{subreddit}"
         original_token = client.get(lock_key)
         assert original_token and original_token != successor_token
         client.set(lock_key, successor_token, ex=60)
 
-        eventually(lambda: require_stream_status(APP_B, stream_id, "error"))
+        # The old worker must fail closed without deleting a lease that may
+        # belong to a successor. Lease loss is not a terminal stream error.
+        time.sleep(1)
+        assert require_stream_status(APP_B, stream_id, "active")["instance_id"] == (
+            original_instance
+        )
         assert client.get(lock_key) == successor_token
+
+        # Once the foreign lease disappears, exactly one reconciler adopts the
+        # stream and records its new owner.
+        client.delete(lock_key)
+        replacement_token = eventually(
+            lambda: (
+                client.get(lock_key)
+                if client.get(lock_key) not in {None, original_token, successor_token}
+                else (_ for _ in ()).throw(
+                    AssertionError("stream has not been adopted")
+                )
+            ),
+            timeout=10,
+        )
+        assert replacement_token not in {original_token, successor_token}
+        adopted = require_stream_status(APP_B, stream_id, "active")
+
         row = await eventually_async(
             lambda: required_database_row(
-                "SELECT status FROM streams WHERE id = $1", stream_id
+                "SELECT status, instance_id FROM streams WHERE id = $1", stream_id
             )
         )
-        assert row["status"] == "error"
+        assert row["status"] == "active"
+        assert row["instance_id"] == adopted["instance_id"]
+        stop_and_wait(APP_A, stream_id)
     finally:
-        client.delete(f"stream:lock:{subreddit}")
+        lock_key = f"stream:lock:{subreddit}"
+        if client.get(lock_key) == successor_token:
+            client.delete(lock_key)
         client.close()

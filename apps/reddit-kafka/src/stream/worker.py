@@ -23,14 +23,10 @@ from src.repositories.stream_registry import StreamRegistry
 from src.serializers.avro_serializer import get_serializer
 from src.stream.circuit_breaker import CircuitBreaker
 from src.stream.error_handler import ErrorHandler, RecoveryStrategy
-from src.stream.exceptions import KafkaDeliveryError
+from src.stream.exceptions import KafkaDeliveryError, LockLostError
 from src.stream.lock import DistributedLockManager
 
 logger = logging.getLogger(__name__)
-
-
-class LockLostError(RuntimeError):
-    """Raised when a worker can no longer prove ownership of its lock."""
 
 
 class StreamWorker:
@@ -125,6 +121,10 @@ class StreamWorker:
         try:
             logger.info(f"StreamWorker starting for {self.subreddit}")
 
+            # Construction may involve schema-registry I/O. Verify the exact
+            # lease again before this worker is allowed to consume or produce.
+            await self._refresh_lock_or_raise()
+
             stream_task = asyncio.create_task(
                 self._stream_loop(), name=f"stream-loop-{self.stream_id}"
             )
@@ -141,7 +141,7 @@ class StreamWorker:
                     shutdown_event = True
                     # The refresher only completes by raising on lock loss or an
                     # inability to verify ownership. Propagate that failure so the
-                    # manager records the stream as errored.
+                    # manager leaves the stream eligible for failover.
                     await lock_task
                     raise LockLostError(
                         f"Lock refresher stopped unexpectedly for {self.subreddit}"
@@ -369,7 +369,9 @@ class StreamWorker:
             logger.error("Rate limited by Reddit API")
         elif isinstance(error, (NotFound, Forbidden)):
             logger.error("Subreddit unavailable: %s", error)
-            await self.registry.update_status(self.stream_id, "error")
+            await self.registry.update_status_if_owner(
+                self.stream_id, "error", self.instance_id
+            )
         elif isinstance(error, RequestException):
             logger.error(f"Reddit API request error: {error}")
         else:
@@ -400,37 +402,41 @@ class StreamWorker:
         """Refresh the lock, failing closed if ownership cannot be verified."""
         while True:
             await asyncio.sleep(self.lock_refresh_interval)
-            try:
-                success = await asyncio.wait_for(
-                    self.lock_manager.refresh_lock(
-                        self.subreddit,
-                        self.lock_token,
-                        ttl=self.lock_ttl,
-                    ),
-                    timeout=self.lock_refresh_timeout,
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                self._record_lock_loss()
-                raise LockLostError(
-                    f"Could not verify lock ownership for {self.subreddit}"
-                ) from exc
+            await self._refresh_lock_or_raise()
 
-            if not success:
-                self._record_lock_loss()
-                raise LockLostError(f"Lock ownership lost for {self.subreddit}")
+    async def _refresh_lock_or_raise(self) -> None:
+        """Refresh the exact lease token or fail before processing data."""
+        try:
+            success = await asyncio.wait_for(
+                self.lock_manager.refresh_lock(
+                    self.subreddit,
+                    self.lock_token,
+                    ttl=self.lock_ttl,
+                ),
+                timeout=self.lock_refresh_timeout,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._record_lock_loss()
+            raise LockLostError(
+                f"Could not verify lock ownership for {self.subreddit}"
+            ) from exc
 
-            # Send a lightweight heartbeat to the registry so `updated_at`
-            # reflects liveness while the worker is running. Failures here do
-            # not affect the Redis lease and therefore are non-fatal.
-            try:
-                await self.registry.heartbeat(self.stream_id, self.instance_id)
-            except Exception:
-                logger.debug(
-                    "Failed to update registry heartbeat for %s",
-                    self.stream_id,
-                )
+        if not success:
+            self._record_lock_loss()
+            raise LockLostError(f"Lock ownership lost for {self.subreddit}")
+
+        # Send a lightweight heartbeat to the registry so `updated_at`
+        # reflects liveness while the worker is running. Failures here do not
+        # affect the Redis lease and therefore are non-fatal.
+        try:
+            await self.registry.heartbeat(self.stream_id, self.instance_id)
+        except Exception:
+            logger.debug(
+                "Failed to update registry heartbeat for %s",
+                self.stream_id,
+            )
 
     def _record_lock_loss(self) -> None:
         """Record lock loss without delaying the watchdog failure."""
@@ -451,7 +457,9 @@ class StreamWorker:
 
         if RecoveryStrategy.should_abandon_stream(error):
             logger.error(f"Fatal error, abandoning stream: {error}")
-            await self.registry.update_status(self.stream_id, "error")
+            await self.registry.update_status_if_owner(
+                self.stream_id, "error", self.instance_id
+            )
             raise error
 
         if RecoveryStrategy.should_retry_with_backoff(error):

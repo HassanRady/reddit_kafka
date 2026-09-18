@@ -46,6 +46,34 @@ redis.call("sadd", KEYS[2], ARGV[3])
 return 1
 """
 
+_UPDATE_STATUS_IF_OWNER_SCRIPT = """
+if redis.call("exists", KEYS[1]) == 0 then
+    return 0
+end
+if redis.call("hget", KEYS[1], "instance_id") ~= ARGV[1] then
+    return 0
+end
+redis.call("hset", KEYS[1], "status", ARGV[2], "updated_at", ARGV[3])
+return 1
+"""
+
+_FINALIZE_STOP_IF_UNOWNED_SCRIPT = """
+if redis.call("exists", KEYS[1]) == 0 then
+    return 0
+end
+if redis.call("hget", KEYS[1], "status") ~= "stopping" then
+    return 0
+end
+if redis.call("hget", KEYS[1], "updated_at") ~= ARGV[1] then
+    return 0
+end
+if redis.call("exists", KEYS[2]) == 1 then
+    return 0
+end
+redis.call("hset", KEYS[1], "status", "stopped", "updated_at", ARGV[2])
+return 1
+"""
+
 _default_session_maker: Callable[[], Any] | None = None
 
 with suppress(Exception):
@@ -261,12 +289,22 @@ class StreamRegistry:
     async def update_status(
         self, stream_id: str, status: str, instance_id: str | None = None
     ) -> None:
+        previous_instance_id: str | None = None
+        if instance_id is not None:
+            previous_instance_id = await self._redis.hget(
+                self._meta_key(stream_id), "instance_id"
+            )
+
         mapping = {"status": status, "updated_at": _now_iso()}
         if instance_id is not None:
             mapping["instance_id"] = instance_id
         await self._redis.hset(self._meta_key(stream_id), mapping=mapping)
         if instance_id is not None:
             await self._redis.sadd(f"streams:instance:{instance_id}", stream_id)
+            if previous_instance_id and previous_instance_id != instance_id:
+                await self._redis.srem(
+                    f"streams:instance:{previous_instance_id}", stream_id
+                )
         # Also update Postgres if session maker available
         if self._session_maker is not None:
             try:
@@ -291,6 +329,87 @@ class StreamRegistry:
                     await session.commit()
             except Exception:
                 logger.exception("Failed to update stream status in Postgres")
+
+    async def update_status_if_owner(
+        self, stream_id: str, status: str, instance_id: str
+    ) -> bool:
+        """Update status only while ``instance_id`` still owns the stream."""
+        updated = await cast(
+            Awaitable[int],
+            self._redis.eval(
+                _UPDATE_STATUS_IF_OWNER_SCRIPT,
+                1,
+                self._meta_key(stream_id),
+                instance_id,
+                status,
+                _now_iso(),
+            ),
+        )
+        if not updated:
+            return False
+
+        if self._session_maker is not None:
+            try:
+                async with self._session_maker() as session:
+                    await session.execute(
+                        text(
+                            """
+                            UPDATE streams
+                            SET status = :status,
+                                updated_at = NOW()
+                            WHERE id = :id AND instance_id = :instance_id
+                            """
+                        ),
+                        {
+                            "status": status,
+                            "id": stream_id,
+                            "instance_id": instance_id,
+                        },
+                    )
+                    await session.commit()
+            except Exception:
+                logger.exception("Failed to persist owner-guarded stream status")
+        return True
+
+    async def finalize_stop_if_unowned(
+        self,
+        stream_id: str,
+        subreddit: str,
+        expected_updated_at: str,
+    ) -> bool:
+        """Finish a stop whose owner disappeared after accepting the request."""
+        updated = await cast(
+            Awaitable[int],
+            self._redis.eval(
+                _FINALIZE_STOP_IF_UNOWNED_SCRIPT,
+                2,
+                self._meta_key(stream_id),
+                f"stream:lock:{subreddit}",
+                expected_updated_at,
+                _now_iso(),
+            ),
+        )
+        if not updated:
+            return False
+
+        if self._session_maker is not None:
+            try:
+                async with self._session_maker() as session:
+                    await session.execute(
+                        text(
+                            """
+                            UPDATE streams
+                            SET status = 'stopped',
+                                updated_at = NOW()
+                            WHERE id = :id AND status = 'stopping'
+                            """
+                        ),
+                        {"id": stream_id},
+                    )
+                    await session.commit()
+            except Exception:
+                logger.exception("Failed to persist orphaned stop completion")
+        return True
 
     async def heartbeat(self, stream_id: str, instance_id: str) -> bool:
         """Refresh liveness in Redis without writing to PostgreSQL."""

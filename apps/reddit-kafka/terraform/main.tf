@@ -750,6 +750,7 @@ resource "aws_ecs_task_definition" "app" {
       { name = "USE_LOCALSTACK", value = tostring(var.use_localstack) },
       { name = "DB_FLUSH_INTERVAL", value = tostring(var.db_flush_interval) },
       { name = "DEAD_STREAM_CLEANUP_INTERVAL", value = tostring(var.dead_stream_cleanup_interval) },
+      { name = "STREAM_RECONCILE_INTERVAL", value = tostring(var.stream_reconcile_interval) },
       { name = "LOG_LEVEL", value = var.log_level },
       { name = "OTEL_SERVICE_NAME", value = var.project_name },
       { name = "SERVICE_VERSION", value = var.app_image_tag },

@@ -28,6 +28,7 @@ x-app: &app
     USE_LOCALSTACK: "false"
     DB_FLUSH_INTERVAL: "1"
     DEAD_STREAM_CLEANUP_INTERVAL: "3600"
+    STREAM_RECONCILE_INTERVAL: "1"
     LOG_LEVEL: INFO
   volumes:
     - ./tests/e2e/harness_app.py:/app/e2e_harness.py:ro

@@ -232,8 +232,14 @@ async def test_lock_loss_cancels_idle_stream_and_propagates_error() -> None:
             stream_cancelled.set()
             raise
 
+    refresh_count = 0
+
     async def lose_lock(*args, **kwargs) -> bool:
+        nonlocal refresh_count
         del args, kwargs
+        refresh_count += 1
+        if refresh_count == 1:
+            return True
         await stream_started.wait()
         return False
 
@@ -267,8 +273,14 @@ async def test_refresh_error_cancels_idle_stream_and_propagates_error() -> None:
             stream_cancelled.set()
             raise
 
+    refresh_count = 0
+
     async def fail_refresh(*args, **kwargs) -> bool:
+        nonlocal refresh_count
         del args, kwargs
+        refresh_count += 1
+        if refresh_count == 1:
+            return True
         await stream_started.wait()
         raise ConnectionError("Redis unavailable")
 
@@ -283,3 +295,21 @@ async def test_refresh_error_cancels_idle_stream_and_propagates_error() -> None:
 
     assert stream_cancelled.is_set()
     assert worker._stop_event.is_set()
+
+
+@pytest.mark.asyncio
+async def test_stale_lease_prevents_stream_from_starting() -> None:
+    worker = make_lock_test_worker()
+    worker._stream_loop = AsyncMock()
+    worker.lock_manager = SimpleNamespace(
+        refresh_lock=AsyncMock(return_value=False),
+        release_lock=AsyncMock(return_value=False),
+    )
+
+    with pytest.raises(LockLostError, match="Lock ownership lost"):
+        await worker.run()
+
+    worker._stream_loop.assert_not_awaited()
+    worker.lock_manager.release_lock.assert_awaited_once_with(
+        "python", "process-1:current-lease"
+    )
