@@ -54,6 +54,7 @@ module "reddit_kafka" {
   otel_exporter_otlp_endpoint = var.otel_exporter_otlp_endpoint
   otel_trace_sample_ratio     = var.otel_trace_sample_ratio
   json_logs                   = var.json_logs
+  stream_reconcile_interval   = var.stream_reconcile_interval
 }
 # Output infrastructure endpoints
 output "alb_dns" {

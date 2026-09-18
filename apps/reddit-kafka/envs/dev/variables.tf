@@ -146,11 +146,6 @@ variable "schema_version" {
   default = "1"
 }
 
-variable "use_localstack" {
-  type    = bool
-  default = false
-}
-
 variable "db_flush_interval" {
   type    = string
   default = "10"
@@ -159,6 +154,11 @@ variable "db_flush_interval" {
 variable "dead_stream_cleanup_interval" {
   type    = string
   default = "120"
+}
+
+variable "stream_reconcile_interval" {
+  type    = string
+  default = "10"
 }
 
 variable "log_level" {

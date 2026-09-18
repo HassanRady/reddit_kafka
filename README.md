@@ -76,8 +76,12 @@ by another instance.
 5. Comments are validated, Avro-serialized, and queued for Kafka. At each 100-comment
    boundary, the producer is flushed before the checkpoint advances.
 6. Redis checkpoints are asynchronously persisted to PostgreSQL by a write-behind
-   flusher. Shutdown stops workers, flushes Kafka, persists remaining checkpoints,
-   and releases owned leases.
+   flusher. Shutdown drains local workers, flushes Kafka, persists remaining
+   checkpoints, and releases owned leases for takeover.
+7. Every healthy instance reconciles shared stream state. If an owner fails, its
+   60-second lease expires and exactly one replica adopts the stream from its saved
+   checkpoint. A graceful instance shutdown releases ownership without changing the
+   user's intent to keep the stream running.
 
 ## Engineering decisions
 
@@ -150,13 +154,13 @@ ISO-8601 format. The source contract is available in
 
 - Docker with Docker Compose v2
 - A Reddit API application (`client_id`, `client_secret`, and `user_agent`)
-- AWS credentials with access to an existing Glue registry/schema, or permission to
-  provision the included schema module
+- AWS credentials only when `USE_AWS_SCHEMA_REGISTRY=true`
 
-The application loads its Avro schema from AWS Glue at startup. Kafka, Redis, and
-PostgreSQL run locally through Docker Compose; live Reddit and Glue access are still
-required for the development stack. The E2E suite replaces only those two external
-boundaries with deterministic test doubles.
+The application can load its Avro schema from AWS Glue or directly from the
+checked-in schema file. Docker Compose disables AWS Glue by default, so local
+development only requires live Reddit credentials. Local messages contain raw Avro
+bytes without the AWS Glue framing header. The E2E suite replaces Reddit with a
+deterministic test double.
 
 ### Start the stack
 
@@ -165,20 +169,19 @@ cd apps/reddit-kafka
 cp .env.sample .env
 ```
 
-Add your Reddit credentials and the required schema settings to `.env`:
+Add your Reddit credentials to `.env`. The sample already selects local schema mode:
 
 ```dotenv
+USE_AWS_SCHEMA_REGISTRY=false
 SCHEMA_REGISTRY_NAME=reddit-kafka-schemas
 SCHEMA_NAME=RedditComment
 SCHEMA_VERSION=1
 AWS_REGION=us-east-1
-USE_LOCALSTACK=false
 ```
 
-For local container credentials, use your preferred AWS credential mechanism. If
-you place `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and optionally
-`AWS_SESSION_TOKEN` in `.env`, keep the file untracked; it is already covered by the
-project `.gitignore`.
+With `USE_AWS_SCHEMA_REGISTRY=false`, the registry name, schema version, AWS region,
+and AWS credentials are not required. Set the flag to `true` to use AWS Glue in
+deployed or integration environments.
 
 To provision the Glue registry and Avro schema in an AWS account:
 
@@ -248,7 +251,7 @@ uv run --frozen mypy src
 If an E2E failure needs inspection, run the suite with `E2E_KEEP_STACK=1` to leave
 its containers running after the test exits.
 
-The current unit suite contains **70 passing test cases**. The E2E harness starts
+The current unit suite contains **81 passing test cases**. The E2E harness starts
 real Kafka, Redis, PostgreSQL, and two independent application containers, then
 verifies:
 
@@ -317,6 +320,9 @@ remote Terraform state prerequisites described in
 - The Redis lease is appropriate for a single-region service but is not a consensus
   protocol. A geo-distributed deployment with stricter ownership guarantees would
   need a stronger coordination design.
+- Instance failover is lease based. With the default 60-second lease and 10-second
+  reconciliation interval, an abruptly orphaned stream normally resumes within
+  roughly 70 seconds. Graceful handoff can occur on the next reconciliation sweep.
 - No throughput number is claimed: capacity depends on Reddit limits, Kafka
   configuration, partitioning, network conditions, and the number of active
   subreddits. The next performance step is a repeatable load test with published

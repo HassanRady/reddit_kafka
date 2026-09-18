@@ -7,7 +7,9 @@ import pytest_asyncio
 
 from src.repositories.stream_registry import (
     _DELETE_STREAM_IF_UNCHANGED_SCRIPT,
+    _FINALIZE_STOP_IF_UNOWNED_SCRIPT,
     _HEARTBEAT_IF_ACTIVE_SCRIPT,
+    _UPDATE_STATUS_IF_OWNER_SCRIPT,
     StreamExistsError,
     StreamNotFoundError,
     StreamRegistry,
@@ -307,6 +309,24 @@ class TestStreamRegistryUpdateStatus:
         session_mock.commit.assert_called()
 
     @pytest.mark.asyncio
+    async def test_owner_change_moves_instance_tracking(
+        self, redis_mock, session_maker_mock
+    ):
+        redis_mock.hget.return_value = "failed-instance"
+        registry = StreamRegistry(redis=redis_mock, session_maker=session_maker_mock)
+
+        await registry.update_status(
+            "stream-1", "active", instance_id="replacement-instance"
+        )
+
+        redis_mock.sadd.assert_awaited_once_with(
+            "streams:instance:replacement-instance", "stream-1"
+        )
+        redis_mock.srem.assert_awaited_once_with(
+            "streams:instance:failed-instance", "stream-1"
+        )
+
+    @pytest.mark.asyncio
     async def test_heartbeat_only_updates_redis(self, redis_mock, session_maker_mock):
         redis_mock.eval.return_value = 1
         registry = StreamRegistry(redis=redis_mock, session_maker=session_maker_mock)
@@ -325,6 +345,67 @@ class TestStreamRegistryUpdateStatus:
         assert heartbeat_call.args[4] == "instance-1"
         assert heartbeat_call.args[6] == "stream-1"
         session_maker_mock.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_owner_guarded_status_update(
+        self, redis_mock, session_mock, session_maker_mock
+    ):
+        redis_mock.eval.return_value = 1
+        registry = StreamRegistry(redis=redis_mock, session_maker=session_maker_mock)
+
+        updated = await registry.update_status_if_owner(
+            "stream-1", "stopped", "instance-1"
+        )
+
+        assert updated is True
+        call = redis_mock.eval.await_args
+        assert call.args[:5] == (
+            _UPDATE_STATUS_IF_OWNER_SCRIPT,
+            1,
+            "stream:meta:stream-1",
+            "instance-1",
+            "stopped",
+        )
+        session_mock.execute.assert_awaited_once()
+        session_mock.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_stale_owner_cannot_update_status(
+        self, redis_mock, session_maker_mock
+    ):
+        redis_mock.eval.return_value = 0
+        registry = StreamRegistry(redis=redis_mock, session_maker=session_maker_mock)
+
+        updated = await registry.update_status_if_owner(
+            "stream-1", "error", "stale-instance"
+        )
+
+        assert updated is False
+        session_maker_mock.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_finalize_stop_requires_unchanged_unowned_snapshot(
+        self, redis_mock, session_mock, session_maker_mock
+    ):
+        redis_mock.eval.return_value = 1
+        registry = StreamRegistry(redis=redis_mock, session_maker=session_maker_mock)
+
+        finalized = await registry.finalize_stop_if_unowned(
+            "stream-1", "python", "2026-09-17T12:00:00Z"
+        )
+
+        assert finalized is True
+        call = redis_mock.eval.await_args
+        assert call.args[:5] == (
+            _FINALIZE_STOP_IF_UNOWNED_SCRIPT,
+            2,
+            "stream:meta:stream-1",
+            "stream:lock:python",
+            "2026-09-17T12:00:00Z",
+        )
+        assert call.args[5].endswith("Z")
+        session_mock.execute.assert_awaited_once()
+        session_mock.commit.assert_awaited_once()
 
 
 class TestStreamRegistryStopRequest:

@@ -13,6 +13,7 @@ async def test_lifespan_closes_clients_and_flushes_kafka_producer(
     settings = MagicMock()
     settings.db_flush_interval = 30
     settings.dead_stream_cleanup_interval = 30
+    settings.stream_reconcile_interval = 10
     settings.observability = MagicMock()
 
     redis = AsyncMock()
@@ -24,6 +25,7 @@ async def test_lifespan_closes_clients_and_flushes_kafka_producer(
         side_effect=lambda function, *args, **kwargs: function(*args, **kwargs)
     )
     manager = MagicMock()
+    manager.start_reconciliation = AsyncMock()
     manager.stop_all = AsyncMock()
     flusher = MagicMock()
     flusher.start = AsyncMock()
@@ -63,6 +65,7 @@ async def test_lifespan_closes_clients_and_flushes_kafka_producer(
     async with app_module.lifespan(FastAPI()):
         reddit_client.close.assert_not_awaited()
         kafka_producer.flush.assert_not_called()
+        manager.start_reconciliation.assert_awaited_once_with(10)
 
     reddit_client.close.assert_awaited_once_with()
     to_thread.assert_awaited_once_with(kafka_producer.flush, timeout=5.0)

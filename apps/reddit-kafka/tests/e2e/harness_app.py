@@ -118,8 +118,8 @@ class FastE2EStreamWorker(worker_module.StreamWorker):
         self.lock_refresh_timeout = 1
 
 
-def get_json_serializer(*, schema_settings: Any, topic_name: str) -> JsonTestSerializer:
-    del schema_settings, topic_name
+def get_json_serializer(*, schema_settings: Any) -> JsonTestSerializer:
+    del schema_settings
     return JsonTestSerializer()
 
 

@@ -21,13 +21,14 @@ x-app: &app
     KAFKA_BOOTSTRAP_SERVERS: broker:29092
     KAFKA_RAW_TEXT_TOPIC: reddit_e2e_comments
     KAFKA_SECURITY_PROTOCOL: PLAINTEXT
+    USE_AWS_SCHEMA_REGISTRY: "false"
     SCHEMA_REGISTRY_NAME: e2e-registry
     SCHEMA_NAME: RedditComment
     SCHEMA_VERSION: "1"
     AWS_REGION: us-east-1
-    USE_LOCALSTACK: "false"
     DB_FLUSH_INTERVAL: "1"
     DEAD_STREAM_CLEANUP_INTERVAL: "3600"
+    STREAM_RECONCILE_INTERVAL: "1"
     LOG_LEVEL: INFO
   volumes:
     - ./tests/e2e/harness_app.py:/app/e2e_harness.py:ro

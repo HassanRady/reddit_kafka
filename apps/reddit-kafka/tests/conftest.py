@@ -14,6 +14,7 @@ def redis_mock():
     mock.set = AsyncMock()
     mock.get = AsyncMock()
     mock.hset = AsyncMock()
+    mock.hget = AsyncMock(return_value=None)
     mock.hgetall = AsyncMock()
     mock.keys = AsyncMock()
     mock.delete = AsyncMock()

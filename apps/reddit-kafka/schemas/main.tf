@@ -15,16 +15,16 @@ resource "aws_glue_registry" "reddit_kafka" {
 }
 
 resource "aws_glue_schema" "reddit_comment" {
-  registry_arn     = aws_glue_registry.reddit_kafka.arn
+  registry_arn = aws_glue_registry.reddit_kafka.arn
 
-  schema_name       = "RedditComment"
+  schema_name       = var.schema_name
   data_format       = "AVRO"
-  compatibility     = "BACKWARD" # Recommended for most Kafka use cases
+  compatibility     = var.schema_compatibility
   description       = "Reddit comment messages for raw_text Kafka topic"
   schema_definition = file("${path.module}/reddit_comment.avsc")
 
   tags = merge(var.tags, {
-    SchemaType = "RedditComment"
+    SchemaType = var.schema_name
   })
 }
 
@@ -48,24 +48,12 @@ resource "aws_iam_policy" "glue_schema_access" {
         Sid    = "RegistryAccess"
         Effect = "Allow"
         Action = [
-          "glue:GetSchema",
-          "glue:GetSchemaVersion",
-          "glue:GetSchemaVersionsDiff",
-          "glue:ListSchemaVersions"
+          "glue:GetSchemaVersion"
         ]
         Resource = [
           aws_glue_registry.reddit_kafka.arn,
           aws_glue_schema.reddit_comment.arn
         ]
-      },
-      {
-        Sid    = "DiscoveryAccess"
-        Effect = "Allow"
-        Action = [
-          "glue:CheckSchemaVersion",
-          "glue:RegisterSchemaVersion"
-        ]
-        Resource = ["*"]
       }
     ]
   })

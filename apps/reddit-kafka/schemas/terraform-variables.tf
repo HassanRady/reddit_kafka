@@ -28,6 +28,12 @@ variable "registry_description" {
   default     = "Managed by Terraform - Reddit Kafka Schema Registry"
 }
 
+variable "schema_name" {
+  description = "Name of the Reddit comment schema in AWS Glue."
+  type        = string
+  default     = "RedditComment"
+}
+
 variable "schema_compatibility" {
   description = "Schema compatibility mode. BACKWARD ensures new schemas can read old data."
   type        = string
@@ -45,9 +51,9 @@ variable "schema_compatibility" {
 variable "tags" {
   description = "Common tags to apply to all resources"
   type        = map(string)
-  default     = {
-    Project     = "reddit-kafka"
-    ManagedBy   = "terraform"
-    Layer       = "data-governance"
+  default = {
+    Project   = "reddit-kafka"
+    ManagedBy = "terraform"
+    Layer     = "data-governance"
   }
 }

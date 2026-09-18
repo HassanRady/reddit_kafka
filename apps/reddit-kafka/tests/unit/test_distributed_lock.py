@@ -66,3 +66,14 @@ async def test_refresh_uses_atomic_exact_token_comparison(redis_mock) -> None:
     )
     redis_mock.get.assert_not_awaited()
     redis_mock.expire.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_owns_lock_requires_exact_token(redis_mock) -> None:
+    redis_mock.get.return_value = "process-2:successor-token"
+    manager = DistributedLockManager(redis_mock)
+
+    assert await manager.owns_lock("python", "process-1:stale-token") is False
+    assert await manager.owns_lock("python", "process-2:successor-token") is True
+
+    assert redis_mock.get.await_count == 2

@@ -131,6 +131,24 @@ class DistributedLockManager:
             logger.warning(f"✗ Cannot refresh unowned or expired lock for {subreddit}")
         return bool(success)
 
+    async def owns_lock(self, subreddit: str, owner_token: str) -> bool:
+        """Return whether ``owner_token`` is still the exact lease owner."""
+        key = self._lock_key(subreddit)
+        try:
+            current_token = await cast(
+                Awaitable[str | None],
+                self.redis.get(key),
+            )
+        except Exception:
+            METRICS.lock_operations.labels(operation="verify", result="error").inc()
+            raise
+
+        owns = current_token == owner_token
+        METRICS.lock_operations.labels(
+            operation="verify", result="success" if owns else "not_owner"
+        ).inc()
+        return owns
+
     async def release_lock(self, subreddit: str, owner_token: str) -> bool:
         """Release a lock (delete from Redis).
 
