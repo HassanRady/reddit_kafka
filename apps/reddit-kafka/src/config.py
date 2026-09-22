@@ -11,6 +11,11 @@ class RedditSettings(BaseSettings):
 class KafkaSettings(BaseSettings):
     bootstrap_servers: str = Field(alias="KAFKA_BOOTSTRAP_SERVERS")
     raw_text_topic: str = Field(alias="KAFKA_RAW_TEXT_TOPIC")
+    delivery_wait_timeout: float = Field(
+        300.0,
+        alias="KAFKA_DELIVERY_WAIT_TIMEOUT",
+        gt=0,
+    )
     security_protocol: str = Field("PLAINTEXT", alias="KAFKA_SECURITY_PROTOCOL")
     sasl_mechanism: str = Field("SCRAM-SHA-512", alias="KAFKA_SASL_MECHANISM")
     sasl_username: str | None = Field(default=None, alias="KAFKA_SASL_USERNAME")
