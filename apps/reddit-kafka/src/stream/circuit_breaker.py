@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import math
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from enum import Enum
@@ -9,6 +10,7 @@ from typing import Any
 
 from src.observability import METRICS
 from src.stream.error_handler import ErrorHandler
+from src.stream.exceptions import CircuitOpenError
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +73,7 @@ class CircuitBreaker:
             Result of the coroutine
 
         Raises:
-            RuntimeError: If circuit is open
+            CircuitOpenError: If circuit is open
         """
         async with self._lock:
             if self.state == CircuitState.OPEN:
@@ -86,9 +88,7 @@ class CircuitBreaker:
                         self.backoff_seconds,
                     )
                 else:
-                    raise RuntimeError(
-                        f"Circuit breaker OPEN. Retry in {self._time_until_retry()}s"
-                    )
+                    raise CircuitOpenError(self._time_until_retry())
 
         try:
             result = await coro_factory()
@@ -121,7 +121,9 @@ class CircuitBreaker:
         if not self.last_failure_time:
             return 0
         elapsed = (datetime.now(UTC) - self.last_failure_time).total_seconds()
-        return max(0, int(self.backoff_seconds - elapsed))
+        # Round up so callers never wake and spin while a fractional second of
+        # the recovery window remains.
+        return max(0, math.ceil(self.backoff_seconds - elapsed))
 
     def _record_success(self) -> None:
         """Record a successful call."""

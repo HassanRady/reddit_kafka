@@ -21,7 +21,7 @@ from asyncprawcore.exceptions import (
 from sqlalchemy import text
 
 from src.observability import METRICS
-from src.stream.exceptions import KafkaDeliveryError
+from src.stream.exceptions import CircuitOpenError, KafkaDeliveryError
 
 _default_session_maker: Callable[[], Any] | None = None
 
@@ -39,7 +39,7 @@ _FATAL_EXCEPTIONS = (
     ValueError,
     KafkaDeliveryError,
 )
-_BACKOFF_EXCEPTIONS = (TooManyRequests,)
+_BACKOFF_EXCEPTIONS = (TooManyRequests, CircuitOpenError)
 _RETRYABLE_EXCEPTIONS = (
     ConnectionError,
     TimeoutError,
@@ -208,12 +208,12 @@ class ErrorHandler:
             True if retryable, False if fatal
         """
         return not isinstance(error, _FATAL_EXCEPTIONS) and isinstance(
-            error, _RETRYABLE_EXCEPTIONS
+            error, (*_RETRYABLE_EXCEPTIONS, *_BACKOFF_EXCEPTIONS)
         )
 
     @staticmethod
     def should_backoff(error: Exception) -> bool:
-        """Check if error requires backoff (rate limit, not generic error).
+        """Check if an error carries a required backoff policy.
 
         Args:
             error: Exception instance
@@ -235,6 +235,8 @@ class ErrorHandler:
         """
         if isinstance(error, TooManyRequests):
             return 60  # Start with 60s, exponential backoff will increase
+        if isinstance(error, CircuitOpenError):
+            return error.retry_after
         return 5  # Default short backoff for network errors
 
 
@@ -244,11 +246,11 @@ class RecoveryStrategy:
     """
 
     @staticmethod
-    def should_retry_immediately(error: Exception) -> bool:
-        """Determine if error warrants immediate retry."""
+    def should_retry_transient(error: Exception) -> bool:
+        """Determine if a transient error warrants a delayed retry."""
         retryable = ErrorHandler.is_retryable(error)
-        is_rate_limit = ErrorHandler.should_backoff(error)
-        return retryable and not is_rate_limit
+        has_required_backoff = ErrorHandler.should_backoff(error)
+        return retryable and not has_required_backoff
 
     @staticmethod
     def should_retry_with_backoff(error: Exception) -> bool:

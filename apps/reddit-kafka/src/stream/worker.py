@@ -464,11 +464,15 @@ class StreamWorker:
 
         if RecoveryStrategy.should_retry_with_backoff(error):
             backoff = ErrorHandler.get_backoff_duration(error)
-            logger.warning(f"Rate limited, backing off for {backoff}s")
+            logger.warning("Recovery delayed for %ss: %s", backoff, error)
             await asyncio.sleep(backoff)
 
-        elif RecoveryStrategy.should_retry_immediately(error):
-            logger.warning(f"Retryable error, retrying immediately: {error}")
+        elif RecoveryStrategy.should_retry_transient(error):
+            # Even ordinary transient failures need a small delay; otherwise a
+            # closed circuit burns through its threshold in a tight retry loop.
+            backoff = ErrorHandler.get_backoff_duration(error)
+            logger.warning("Retryable error, retrying in %ss: %s", backoff, error)
+            await asyncio.sleep(backoff)
 
         else:
             logger.error(f"Unhandled error: {error}")

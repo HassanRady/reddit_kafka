@@ -7,9 +7,54 @@ from prometheus_client import CollectorRegistry
 
 import src.stream.worker as worker_module
 from src.observability.metrics import ApplicationMetrics
-from src.stream.circuit_breaker import CircuitBreaker
+from src.stream.circuit_breaker import CircuitBreaker, CircuitState
 from src.stream.exceptions import KafkaDeliveryError
 from src.stream.worker import LockLostError, StreamWorker
+
+
+@pytest.mark.asyncio
+async def test_open_circuit_waits_and_reaches_half_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = StreamWorker.__new__(StreamWorker)
+    worker.subreddit = "python"
+    worker.stream_id = "stream-1"
+    worker.instance_id = "process-1"
+    worker._stop_event = asyncio.Event()
+    worker.circuit_breaker = CircuitBreaker(recovery_timeout=60)
+    worker.circuit_breaker.state = CircuitState.OPEN
+    worker.circuit_breaker._should_attempt_reset = MagicMock(side_effect=[False, True])
+    worker.circuit_breaker._time_until_retry = MagicMock(return_value=17)
+    worker.error_handler = SimpleNamespace(record_error=AsyncMock())
+    worker.registry = SimpleNamespace(update_status_if_owner=AsyncMock())
+    fetch = AsyncMock(side_effect=lambda: worker._stop_event.set())
+    worker._fetch_and_process_comments = fetch
+    sleep = AsyncMock()
+    monkeypatch.setattr(worker_module.asyncio, "sleep", sleep)
+
+    await worker._stream_loop()
+
+    sleep.assert_awaited_once_with(17)
+    fetch.assert_awaited_once_with()
+    assert worker.circuit_breaker.state == CircuitState.HALF_OPEN
+    worker.registry.update_status_if_owner.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_transient_failure_waits_before_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = StreamWorker.__new__(StreamWorker)
+    worker.stream_id = "stream-1"
+    worker.error_handler = SimpleNamespace(record_error=AsyncMock())
+    worker.registry = SimpleNamespace(update_status_if_owner=AsyncMock())
+    sleep = AsyncMock()
+    monkeypatch.setattr(worker_module.asyncio, "sleep", sleep)
+
+    await worker._handle_error(ConnectionError("temporarily unavailable"))
+
+    sleep.assert_awaited_once_with(5)
+    worker.registry.update_status_if_owner.assert_not_awaited()
 
 
 @pytest.mark.asyncio

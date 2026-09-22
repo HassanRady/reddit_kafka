@@ -5,6 +5,7 @@ import pytest
 from asyncprawcore.exceptions import TooManyRequests
 
 from src.stream.circuit_breaker import CircuitBreaker, CircuitState
+from src.stream.exceptions import CircuitOpenError
 
 
 class TestCircuitBreaker:
@@ -21,10 +22,11 @@ class TestCircuitBreaker:
             called = True
             return "ok"
 
-        with pytest.raises(RuntimeError, match="Circuit breaker OPEN"):
+        with pytest.raises(CircuitOpenError, match="Circuit breaker OPEN") as raised:
             await breaker.call(coro_factory)
 
         assert not called
+        assert raised.value.retry_after == 60
 
     @pytest.mark.asyncio
     async def test_failure_opens_circuit_after_threshold(self):
