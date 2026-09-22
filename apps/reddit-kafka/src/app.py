@@ -107,6 +107,7 @@ async def _create_runner(
             instance_id=instance_id,
             stream_id=stream_id,
             kafka_topic=kafka_topic,
+            delivery_wait_timeout=settings.kafka.delivery_wait_timeout,
             schema_settings=schema_settings,
             lock_token=lock_token,
         )

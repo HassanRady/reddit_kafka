@@ -13,7 +13,7 @@ from asyncprawcore.exceptions import (
 )
 
 from src.stream.error_handler import ErrorHandler, RecoveryStrategy
-from src.stream.exceptions import KafkaDeliveryError
+from src.stream.exceptions import CircuitOpenError, KafkaDeliveryError
 
 
 class TestErrorHandlerRecordError:
@@ -71,27 +71,27 @@ class TestErrorHandlerRecordError:
 class TestRecoveryStrategy:
     """Test recovery strategy determination."""
 
-    def test_should_retry_immediately_for_transient_error(self):
+    def test_should_retry_transient_for_transient_error(self):
         class ServiceConnectionError(ConnectionError):
             pass
 
         error = ServiceConnectionError("Network error")
-        assert RecoveryStrategy.should_retry_immediately(error)
+        assert RecoveryStrategy.should_retry_transient(error)
 
-    def test_should_retry_immediately_for_connector_error(self):
+    def test_should_retry_transient_for_connector_error(self):
         error = ClientConnectorError(None, OSError("Connection refused"))
-        assert RecoveryStrategy.should_retry_immediately(error)
+        assert RecoveryStrategy.should_retry_transient(error)
 
-    def test_should_retry_immediately_for_wrapped_request_error(self):
+    def test_should_retry_transient_for_wrapped_request_error(self):
         error = RequestException(OSError("Connection refused"), (), {})
-        assert RecoveryStrategy.should_retry_immediately(error)
+        assert RecoveryStrategy.should_retry_transient(error)
 
-    def test_should_retry_immediately_for_response_exception_subclass(self):
+    def test_should_retry_transient_for_response_exception_subclass(self):
         class TemporaryResponseError(ResponseException):
             pass
 
         error = TemporaryResponseError(MagicMock())
-        assert RecoveryStrategy.should_retry_immediately(error)
+        assert RecoveryStrategy.should_retry_transient(error)
 
     def test_should_abandon_stream_for_kafka_delivery_error(self):
         error = KafkaDeliveryError("Broker rejected message")
@@ -104,6 +104,13 @@ class TestRecoveryStrategy:
         error = CustomTooManyRequests(MagicMock())
         assert RecoveryStrategy.should_retry_with_backoff(error)
         assert ErrorHandler.get_backoff_duration(error) == 60
+
+    def test_should_retry_with_backoff_for_open_circuit(self):
+        error = CircuitOpenError(retry_after=17)
+
+        assert RecoveryStrategy.should_retry_with_backoff(error)
+        assert ErrorHandler.is_retryable(error)
+        assert ErrorHandler.get_backoff_duration(error) == 17
 
     def test_should_abandon_stream_for_fatal_error(self):
         class CustomNotFound(NotFound):

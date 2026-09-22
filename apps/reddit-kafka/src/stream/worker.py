@@ -51,6 +51,7 @@ class StreamWorker:
         instance_id: str,
         stream_id: str,
         kafka_topic: str,
+        delivery_wait_timeout: float,
         schema_settings: SchemaSettings,
         lock_token: str,
     ) -> None:
@@ -64,6 +65,7 @@ class StreamWorker:
             instance_id: Instance ID
             stream_id: Stream UUID
             kafka_topic: Kafka topic to produce to
+            delivery_wait_timeout: Maximum seconds to await this worker's deliveries
             schema_settings: SchemaSettings for Avro serialization
             lock_token: Exact ownership token returned when the lease was acquired
         """
@@ -75,6 +77,7 @@ class StreamWorker:
         self.instance_id = instance_id
         self.stream_id = stream_id
         self.kafka_topic = kafka_topic
+        self.delivery_wait_timeout = delivery_wait_timeout
         self.schema_settings = schema_settings
         self.lock_token = lock_token
 
@@ -96,7 +99,7 @@ class StreamWorker:
 
         self.checkpoint_interval = 100
         self.comments_since_checkpoint = 0
-        self._delivery_errors: list[str] = []
+        self._pending_deliveries: list[asyncio.Future[str | None]] = []
         self.lock_refresh_interval = 30
         self.lock_ttl = 60
         self.lock_refresh_timeout = 10
@@ -268,9 +271,20 @@ class StreamWorker:
                     raise ValueError("Serializer returned no payload")
 
                 try:
+                    loop = asyncio.get_running_loop()
+                    delivery: asyncio.Future[str | None] = loop.create_future()
+
+                    def on_delivery(error: Any, message: Any) -> None:
+                        loop.call_soon_threadsafe(
+                            self._complete_delivery,
+                            delivery,
+                            error,
+                            message,
+                        )
+
                     produce_options: dict[str, Any] = {
                         "key": self.subreddit.encode("utf-8"),
-                        "on_delivery": self._on_delivery,
+                        "on_delivery": on_delivery,
                     }
                     trace_headers = kafka_trace_headers()
                     if trace_headers:
@@ -280,6 +294,7 @@ class StreamWorker:
                         serialized_message,
                         **produce_options,
                     )
+                    self._pending_deliveries.append(delivery)
                     self.kafka_producer.poll(0)
                 except Exception as e:
                     raise KafkaDeliveryError(
@@ -288,7 +303,7 @@ class StreamWorker:
 
                 self.comments_since_checkpoint += 1
                 if self.comments_since_checkpoint >= self.checkpoint_interval:
-                    await self._flush_delivery_batch()
+                    await self._wait_for_delivery_batch()
                     await self._save_checkpoint_for_comment_id(str(comment.id))
                     self.comments_since_checkpoint = 0
                 outcome = "queued"
@@ -320,8 +335,16 @@ class StreamWorker:
                     time.perf_counter() - started
                 )
 
-    def _on_delivery(self, error: Any, message: Any) -> None:
-        """Record asynchronous delivery failures reported by librdkafka."""
+    def _complete_delivery(
+        self,
+        delivery: asyncio.Future[str | None],
+        error: Any,
+        message: Any,
+    ) -> None:
+        """Record a delivery report and resolve its worker-local acknowledgement."""
+        if delivery.done():
+            return
+
         payload = message.value() if message is not None else None
         payload_size = (
             len(payload) if isinstance(payload, (bytes, bytearray, memoryview)) else 0
@@ -330,34 +353,60 @@ class StreamWorker:
             METRICS.kafka_deliveries.labels(result="success").inc()
             METRICS.kafka_delivery_bytes.labels(result="success").inc(payload_size)
             METRICS.last_delivery_timestamp.set_to_current_time()
+            delivery.set_result(None)
             return
 
         METRICS.kafka_deliveries.labels(result="error").inc()
         METRICS.kafka_delivery_bytes.labels(result="error").inc(payload_size)
         error_message = str(error)
-        self._delivery_errors.append(error_message)
+        delivery.set_result(error_message)
         logger.error(
             "Kafka delivery failed for stream %s: %s",
             self.stream_id,
             error_message,
         )
 
-    async def _flush_delivery_batch(self) -> None:
-        """Wait for batch delivery and fail before advancing its checkpoint."""
-        try:
-            remaining_messages = await asyncio.to_thread(self.kafka_producer.flush)
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            raise KafkaDeliveryError(f"Kafka flush failed: {e}") from e
+    async def _wait_for_delivery_batch(self) -> None:
+        """Await only this worker's batch without flushing the shared producer."""
+        deliveries = tuple(self._pending_deliveries)
+        if not deliveries:
+            return
 
-        delivery_errors = self._delivery_errors
-        self._delivery_errors = []
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.delivery_wait_timeout
+        pending = set(deliveries)
 
-        if remaining_messages:
-            raise KafkaDeliveryError(
-                f"Kafka flush left {remaining_messages} message(s) queued"
+        while pending:
+            # poll(0) serves callbacks without blocking or forcing librdkafka to
+            # drain its process-wide queue. Another worker may serve these same
+            # callbacks, so wait briefly for either progress or the next poll.
+            try:
+                self.kafka_producer.poll(0)
+            except Exception as error:
+                self._pending_deliveries.clear()
+                raise KafkaDeliveryError(f"Kafka poll failed: {error}") from error
+            pending = {delivery for delivery in pending if not delivery.done()}
+            if not pending:
+                break
+
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                self._pending_deliveries.clear()
+                raise KafkaDeliveryError(
+                    "Timed out after "
+                    f"{self.delivery_wait_timeout:g}s waiting for "
+                    f"{len(pending)} Kafka delivery report(s)"
+                )
+
+            _, pending = await asyncio.wait(
+                pending,
+                timeout=min(0.05, remaining),
+                return_when=asyncio.FIRST_COMPLETED,
             )
+
+        self._pending_deliveries.clear()
+        delivery_results = [delivery.result() for delivery in deliveries]
+        delivery_errors = [result for result in delivery_results if result is not None]
         if delivery_errors:
             raise KafkaDeliveryError(
                 f"Kafka failed to deliver {len(delivery_errors)} message(s): "
@@ -464,11 +513,15 @@ class StreamWorker:
 
         if RecoveryStrategy.should_retry_with_backoff(error):
             backoff = ErrorHandler.get_backoff_duration(error)
-            logger.warning(f"Rate limited, backing off for {backoff}s")
+            logger.warning("Recovery delayed for %ss: %s", backoff, error)
             await asyncio.sleep(backoff)
 
-        elif RecoveryStrategy.should_retry_immediately(error):
-            logger.warning(f"Retryable error, retrying immediately: {error}")
+        elif RecoveryStrategy.should_retry_transient(error):
+            # Even ordinary transient failures need a small delay; otherwise a
+            # closed circuit burns through its threshold in a tight retry loop.
+            backoff = ErrorHandler.get_backoff_duration(error)
+            logger.warning("Retryable error, retrying in %ss: %s", backoff, error)
+            await asyncio.sleep(backoff)
 
         else:
             logger.error(f"Unhandled error: {error}")

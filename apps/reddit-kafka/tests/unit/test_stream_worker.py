@@ -1,15 +1,60 @@
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import ANY, AsyncMock, MagicMock
 
 import pytest
 from prometheus_client import CollectorRegistry
 
 import src.stream.worker as worker_module
 from src.observability.metrics import ApplicationMetrics
-from src.stream.circuit_breaker import CircuitBreaker
+from src.stream.circuit_breaker import CircuitBreaker, CircuitState
 from src.stream.exceptions import KafkaDeliveryError
 from src.stream.worker import LockLostError, StreamWorker
+
+
+@pytest.mark.asyncio
+async def test_open_circuit_waits_and_reaches_half_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = StreamWorker.__new__(StreamWorker)
+    worker.subreddit = "python"
+    worker.stream_id = "stream-1"
+    worker.instance_id = "process-1"
+    worker._stop_event = asyncio.Event()
+    worker.circuit_breaker = CircuitBreaker(recovery_timeout=60)
+    worker.circuit_breaker.state = CircuitState.OPEN
+    worker.circuit_breaker._should_attempt_reset = MagicMock(side_effect=[False, True])
+    worker.circuit_breaker._time_until_retry = MagicMock(return_value=17)
+    worker.error_handler = SimpleNamespace(record_error=AsyncMock())
+    worker.registry = SimpleNamespace(update_status_if_owner=AsyncMock())
+    fetch = AsyncMock(side_effect=lambda: worker._stop_event.set())
+    worker._fetch_and_process_comments = fetch
+    sleep = AsyncMock()
+    monkeypatch.setattr(worker_module.asyncio, "sleep", sleep)
+
+    await worker._stream_loop()
+
+    sleep.assert_awaited_once_with(17)
+    fetch.assert_awaited_once_with()
+    assert worker.circuit_breaker.state == CircuitState.HALF_OPEN
+    worker.registry.update_status_if_owner.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_transient_failure_waits_before_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = StreamWorker.__new__(StreamWorker)
+    worker.stream_id = "stream-1"
+    worker.error_handler = SimpleNamespace(record_error=AsyncMock())
+    worker.registry = SimpleNamespace(update_status_if_owner=AsyncMock())
+    sleep = AsyncMock()
+    monkeypatch.setattr(worker_module.asyncio, "sleep", sleep)
+
+    await worker._handle_error(ConnectionError("temporarily unavailable"))
+
+    sleep.assert_awaited_once_with(5)
+    worker.registry.update_status_if_owner.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -68,102 +113,147 @@ async def test_received_comment_resets_failures_while_stream_remains_open(
 
 
 @pytest.mark.asyncio
-async def test_checkpoint_flush_does_not_block_event_loop(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_checkpoint_waits_for_worker_delivery_without_global_flush() -> None:
     comment = SimpleNamespace(
         id="comment-1",
         author=SimpleNamespace(name="author-1"),
         body="message",
     )
     kafka_producer = MagicMock()
-    kafka_producer.flush.return_value = 0
-    to_thread = AsyncMock(
-        side_effect=lambda function, *args, **kwargs: function(*args, **kwargs)
-    )
+    callback_served = False
+
+    def poll(timeout: float) -> int:
+        nonlocal callback_served
+        if not callback_served:
+            callback_served = True
+            callback = kafka_producer.produce.call_args.kwargs["on_delivery"]
+            callback(None, SimpleNamespace(value=lambda: b"serialized-message"))
+        return 1
+
+    kafka_producer.poll.side_effect = poll
 
     worker = StreamWorker.__new__(StreamWorker)
     worker.subreddit = "python"
     worker.stream_id = "stream-1"
     worker.kafka_topic = "raw-text"
     worker.kafka_producer = kafka_producer
+    worker.delivery_wait_timeout = 1
     worker.serializer = MagicMock()
     worker.serializer.serialize.return_value = b"serialized-message"
     worker.checkpoint_interval = 100
     worker.comments_since_checkpoint = 99
-    worker._delivery_errors = []
+    worker._pending_deliveries = []
     worker._save_checkpoint_for_comment_id = AsyncMock()
     worker.error_handler = SimpleNamespace(record_error=AsyncMock())
-    monkeypatch.setattr(worker_module.asyncio, "to_thread", to_thread)
 
     await worker._process_comment(comment, {})
 
     worker._save_checkpoint_for_comment_id.assert_awaited_once_with("comment-1")
-    to_thread.assert_awaited_once_with(kafka_producer.flush)
-    kafka_producer.flush.assert_called_once_with()
+    kafka_producer.flush.assert_not_called()
     kafka_producer.produce.assert_called_once_with(
         "raw-text",
         b"serialized-message",
         key=b"python",
-        on_delivery=worker._on_delivery,
+        on_delivery=ANY,
     )
     assert worker.comments_since_checkpoint == 0
+    assert worker._pending_deliveries == []
 
 
-def test_delivery_callback_records_successful_payload_bytes(
+@pytest.mark.asyncio
+async def test_delivery_completion_records_successful_payload_bytes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     metrics = ApplicationMetrics(CollectorRegistry())
     monkeypatch.setattr(worker_module, "METRICS", metrics)
     worker = StreamWorker.__new__(StreamWorker)
-    worker._delivery_errors = []
+    delivery = asyncio.get_running_loop().create_future()
     message = SimpleNamespace(value=lambda: b"serialized-message")
 
-    worker._on_delivery(None, message)
+    worker._complete_delivery(delivery, None, message)
 
+    assert await delivery is None
     payload = metrics.render().decode()
     assert 'reddit_kafka_kafka_deliveries_total{result="success"} 1.0' in payload
     assert 'reddit_kafka_kafka_delivery_bytes_total{result="success"} 18.0' in payload
 
 
 @pytest.mark.asyncio
-async def test_delivery_failure_does_not_advance_checkpoint(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_delivery_failure_does_not_advance_checkpoint() -> None:
     comment = SimpleNamespace(
         id="comment-1",
         author=SimpleNamespace(name="author-1"),
         body="message",
     )
     kafka_producer = MagicMock()
+    callback_served = False
 
-    def flush() -> int:
+    def poll(timeout: float) -> int:
+        nonlocal callback_served
+        if callback_served:
+            return 0
+        callback_served = True
         delivery_callback = kafka_producer.produce.call_args.kwargs["on_delivery"]
-        delivery_callback(RuntimeError("broker rejected message"), MagicMock())
-        return 0
+        delivery_callback(
+            RuntimeError("broker rejected message"),
+            SimpleNamespace(value=lambda: b"serialized-message"),
+        )
+        return 1
 
-    to_thread = AsyncMock(side_effect=lambda function: function())
-    kafka_producer.flush.side_effect = flush
+    kafka_producer.poll.side_effect = poll
 
     worker = StreamWorker.__new__(StreamWorker)
     worker.subreddit = "python"
     worker.stream_id = "stream-1"
     worker.kafka_topic = "raw-text"
     worker.kafka_producer = kafka_producer
+    worker.delivery_wait_timeout = 1
     worker.serializer = MagicMock()
     worker.serializer.serialize.return_value = b"serialized-message"
     worker.checkpoint_interval = 100
     worker.comments_since_checkpoint = 99
-    worker._delivery_errors = []
+    worker._pending_deliveries = []
     worker._save_checkpoint_for_comment_id = AsyncMock()
     worker.error_handler = SimpleNamespace(record_error=AsyncMock())
-    monkeypatch.setattr(worker_module.asyncio, "to_thread", to_thread)
 
     with pytest.raises(KafkaDeliveryError, match="broker rejected message"):
         await worker._process_comment(comment, {})
 
     worker._save_checkpoint_for_comment_id.assert_not_awaited()
+    kafka_producer.flush.assert_not_called()
     assert worker.comments_since_checkpoint == 100
+
+
+@pytest.mark.asyncio
+async def test_delivery_wait_does_not_wait_for_other_workers_queue() -> None:
+    worker = StreamWorker.__new__(StreamWorker)
+    worker.kafka_producer = MagicMock()
+    worker.kafka_producer.__len__.return_value = 999
+    worker.delivery_wait_timeout = 1
+    delivery = asyncio.get_running_loop().create_future()
+    worker._pending_deliveries = [delivery]
+    worker.kafka_producer.poll.side_effect = lambda timeout: delivery.set_result(None)
+
+    await worker._wait_for_delivery_batch()
+
+    worker.kafka_producer.flush.assert_not_called()
+    worker.kafka_producer.__len__.assert_not_called()
+    assert worker._pending_deliveries == []
+
+
+@pytest.mark.asyncio
+async def test_delivery_wait_has_bounded_timeout() -> None:
+    worker = StreamWorker.__new__(StreamWorker)
+    worker.kafka_producer = MagicMock()
+    worker.delivery_wait_timeout = 0.01
+    delivery = asyncio.get_running_loop().create_future()
+    worker._pending_deliveries = [delivery]
+
+    with pytest.raises(KafkaDeliveryError, match=r"Timed out after 0\.01s"):
+        await worker._wait_for_delivery_batch()
+
+    worker.kafka_producer.flush.assert_not_called()
+    assert worker._pending_deliveries == []
 
 
 @pytest.mark.asyncio
